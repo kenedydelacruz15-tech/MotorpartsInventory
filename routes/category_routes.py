@@ -1,11 +1,10 @@
 from flask import Blueprint, request, jsonify
 from flask_jwt_extended import jwt_required, get_jwt
 
-from routes.user_routes import role_required
 from database import get_db_connection
+from routes.user_routes import role_required
 
 
-# Creates the Blueprint for category management.
 category_bp = Blueprint(
     "categories",
     __name__,
@@ -13,46 +12,51 @@ category_bp = Blueprint(
 )
 
 
-# Gets all categories belonging to the logged-in user's store.
+def get_store_id():
+    claims = get_jwt()
+    return claims.get("store_id")
+
+
+def check_store():
+    store_id = get_store_id()
+
+    if not store_id:
+        return None, (
+            jsonify({
+                "message": "User is not assigned to a store."
+            }),
+            400
+        )
+
+    return store_id, None
+
+
 @category_bp.route("/", methods=["GET"])
 @jwt_required()
 def get_categories():
+    claims = get_jwt()
 
-    # Gets the logged-in user's role from the JWT token.
-    user_role = get_jwt().get("role")
-
-    # Gets the logged-in user's store ID from the JWT token.
-    store_id = get_jwt().get("store_id")
-
-    # Prevents ADMIN from accessing store categories.
-    if user_role == "ADMIN":
+    if claims.get("role") == "ADMIN":
         return jsonify({
-            "error": "ADMIN does not manage store categories."
+            "message": "ADMIN does not manage store categories."
         }), 403
 
-    # Ensures the user belongs to a store.
-    if not store_id:
-        return jsonify({
-            "error": "Your account is not assigned to a store."
-        }), 400
+    store_id, error = check_store()
 
-    # Gets optional search and status filters.
+    if error:
+        return error
+
+    status = request.args.get("status", "active")
     search = request.args.get("search", "").strip()
-    status = request.args.get("status", "").strip().lower()
 
     connection = None
     cursor = None
 
     try:
-
-        # Gets a database connection from the pool.
         connection = get_db_connection()
-
-        # Creates a cursor that returns rows as dictionaries.
         cursor = connection.cursor(dictionary=True)
 
-        # Starts the query with categories from the user's store only.
-        sql = """
+        query = """
             SELECT
                 category_id,
                 category_name,
@@ -67,81 +71,67 @@ def get_categories():
 
         params = [store_id]
 
-        # Filters categories using the category name or description.
+        if status == "active":
+            query += " AND is_active = 1"
+
+        elif status == "inactive":
+            query += " AND is_active = 0"
+
+        elif status != "all":
+            return jsonify({
+                "message": "Invalid status. Use active, inactive, or all."
+            }), 400
+
         if search:
-            sql += """
+            query += """
                 AND (
                     category_name LIKE %s
                     OR description LIKE %s
                 )
             """
+
             search_value = f"%{search}%"
             params.extend([search_value, search_value])
 
-        # Filters active categories.
-        if status == "active":
-            sql += " AND is_active = TRUE"
+        query += " ORDER BY category_name ASC"
 
-        # Filters inactive categories.
-        elif status == "inactive":
-            sql += " AND is_active = FALSE"
-
-        # Sorts categories by newest first.
-        sql += " ORDER BY category_id DESC"
-
-        # Executes the category query.
-        cursor.execute(sql, tuple(params))
+        cursor.execute(query, tuple(params))
 
         categories = cursor.fetchall()
 
         return jsonify(categories), 200
 
     except Exception as e:
+        print("GET CATEGORIES ERROR:", e)
 
         return jsonify({
+            "message": "Failed to load categories.",
             "error": str(e)
         }), 500
 
     finally:
-
-        # Closes the database cursor.
         if cursor:
             cursor.close()
 
-        # Returns the connection to the pool.
         if connection:
             connection.close()
 
 
-# Gets one category belonging to the logged-in user's store.
 @category_bp.route("/<int:category_id>", methods=["GET"])
 @jwt_required()
 def get_category(category_id):
+    store_id, error = check_store()
 
-    # Gets the logged-in user's role from the JWT token.
-    user_role = get_jwt().get("role")
-
-    # Gets the logged-in user's store ID from the JWT token.
-    store_id = get_jwt().get("store_id")
-
-    # Prevents ADMIN from accessing store categories.
-    if user_role == "ADMIN":
-        return jsonify({
-            "error": "ADMIN does not manage store categories."
-        }), 403
+    if error:
+        return error
 
     connection = None
     cursor = None
 
     try:
-
-        # Gets a database connection from the pool.
         connection = get_db_connection()
-
-        # Creates a dictionary cursor.
         cursor = connection.cursor(dictionary=True)
 
-        # Gets the category only if it belongs to the user's store.
         cursor.execute("""
             SELECT
                 category_id,
@@ -153,98 +143,80 @@ def get_category(category_id):
                 updated_at
             FROM categories
             WHERE category_id = %s
-            AND store_id = %s
-        """, (
-            category_id,
-            store_id
-        ))
+              AND store_id = %s
+        """, (category_id, store_id))
 
         category = cursor.fetchone()
 
-        # Returns an error when the category does not belong to the store.
         if not category:
             return jsonify({
-                "error": "Category not found."
+                "message": "Category not found."
             }), 404
 
         return jsonify(category), 200
 
     except Exception as e:
+        print("GET CATEGORY ERROR:", e)
 
         return jsonify({
+            "message": "Failed to load category.",
             "error": str(e)
         }), 500
 
     finally:
-
-        # Closes the database cursor.
         if cursor:
             cursor.close()
 
-        # Returns the connection to the pool.
         if connection:
             connection.close()
 
 
-# Allows the OWNER to create a category for their store.
 @category_bp.route("/", methods=["POST"])
+@jwt_required()
 @role_required("OWNER")
 def create_category():
+    store_id, error = check_store()
 
-    # Gets the JSON data sent by the OWNER.
-    data = request.get_json()
+    if error:
+        return error
 
-    if not data:
-        return jsonify({
-            "error": "Request body is required."
-        }), 400
+    data = request.get_json() or {}
 
-    # Gets the category name.
-    category_name = data.get("category_name", "").strip()
+    category_name = str(
+        data.get("category_name", "")
+    ).strip()
 
-    # Gets the optional category description.
-    description = data.get("description", "").strip()
+    description = str(
+        data.get("description", "")
+    ).strip()
 
-    # Requires a category name.
     if not category_name:
         return jsonify({
-            "error": "Category name is required."
+            "message": "Category name is required."
         }), 400
-
-    # Gets the OWNER's store ID from the JWT token.
-    store_id = get_jwt().get("store_id")
 
     connection = None
     cursor = None
 
     try:
-
-        # Gets a database connection from the pool.
         connection = get_db_connection()
+        cursor = connection.cursor(dictionary=True)
 
-        # Creates a database cursor.
-        cursor = connection.cursor()
-
-        # Checks whether the category already exists in this store.
         cursor.execute("""
             SELECT category_id
             FROM categories
-            WHERE category_name = %s
-            AND store_id = %s
-        """, (
-            category_name,
-            store_id
-        ))
+            WHERE store_id = %s
+              AND LOWER(category_name) = LOWER(%s)
+            LIMIT 1
+        """, (store_id, category_name))
 
-        existing_category = cursor.fetchone()
+        existing = cursor.fetchone()
 
-        # Prevents duplicate category names inside the same store.
-        if existing_category:
+        if existing:
             return jsonify({
-                "error": "This category already exists in your store."
+                "message": "Category already exists in this store."
             }), 409
 
-        # Creates the category inside the OWNER's store.
         cursor.execute("""
             INSERT INTO categories (
                 category_name,
@@ -252,14 +224,13 @@ def create_category():
                 store_id,
                 is_active
             )
-            VALUES (%s, %s, %s, TRUE)
+            VALUES (%s, %s, %s, 1)
         """, (
             category_name,
-            description if description else None,
+            description,
             store_id
         ))
 
-        # Saves the new category.
         connection.commit()
 
         return jsonify({
@@ -268,100 +239,104 @@ def create_category():
         }), 201
 
     except Exception as e:
-
-        # Cancels unfinished database changes.
         if connection:
             connection.rollback()
 
+        print("CREATE CATEGORY ERROR:", e)
+
         return jsonify({
+            "message": "Failed to create category.",
             "error": str(e)
         }), 500
 
     finally:
-
-        # Closes the database cursor.
         if cursor:
             cursor.close()
 
-        # Returns the connection to the pool.
         if connection:
             connection.close()
 
 
-# Allows the OWNER to update a category belonging to their store.
 @category_bp.route("/<int:category_id>", methods=["PUT"])
+@jwt_required()
 @role_required("OWNER")
 def update_category(category_id):
+    store_id, error = check_store()
 
-    # Gets the JSON data.
-    data = request.get_json()
+    if error:
+        return error
 
-    if not data:
-        return jsonify({
-            "error": "Request body is required."
-        }), 400
+    data = request.get_json() or {}
 
-    # Gets the updated category name.
-    category_name = data.get("category_name", "").strip()
+    category_name = str(
+        data.get("category_name", "")
+    ).strip()
 
-    # Gets the updated description.
-    description = data.get("description", "").strip()
+    description = str(
+        data.get("description", "")
+    ).strip()
 
-    # Requires a category name.
     if not category_name:
         return jsonify({
-            "error": "Category name is required."
+            "message": "Category name is required."
         }), 400
-
-    # Gets the OWNER's store ID from the JWT token.
-    store_id = get_jwt().get("store_id")
 
     connection = None
     cursor = None
 
     try:
-
-        # Gets a database connection.
         connection = get_db_connection()
+        cursor = connection.cursor(dictionary=True)
 
-        # Creates a database cursor.
-        cursor = connection.cursor()
-
-        # Checks whether the category belongs to the OWNER's store.
         cursor.execute("""
             SELECT category_id
             FROM categories
             WHERE category_id = %s
-            AND store_id = %s
-        """, (
-            category_id,
-            store_id
-        ))
+              AND store_id = %s
+        """, (category_id, store_id))
 
         category = cursor.fetchone()
 
-        # Prevents editing categories from another store.
         if not category:
             return jsonify({
-                "error": "Category not found in your store."
+                "message": "Category not found."
             }), 404
 
-        # Updates the category.
+        cursor.execute("""
+            SELECT category_id
+            FROM categories
+            WHERE store_id = %s
+              AND LOWER(category_name) = LOWER(%s)
+              AND category_id != %s
+            LIMIT 1
+        """, (
+            store_id,
+            category_name,
+            category_id
+        ))
+
+        duplicate = cursor.fetchone()
+
+        if duplicate:
+            return jsonify({
+                "message": "Another category with this name already exists."
+            }), 409
+
         cursor.execute("""
             UPDATE categories
             SET
                 category_name = %s,
-                description = %s
+                description = %s,
+                updated_at = CURRENT_TIMESTAMP
             WHERE category_id = %s
-            AND store_id = %s
+              AND store_id = %s
         """, (
             category_name,
-            description if description else None,
+            description,
             category_id,
             store_id
         ))
 
-        # Saves the changes.
         connection.commit()
 
         return jsonify({
@@ -369,68 +344,74 @@ def update_category(category_id):
         }), 200
 
     except Exception as e:
-
-        # Cancels unfinished database changes.
         if connection:
             connection.rollback()
 
-        if "Duplicate entry" in str(e) or "1062" in str(e):
-            return jsonify({
-                "error": "Category name already exists."
-            }), 409
+        print("UPDATE CATEGORY ERROR:", e)
 
         return jsonify({
+            "message": "Failed to update category.",
             "error": str(e)
         }), 500
 
     finally:
-
-        # Closes the database cursor.
         if cursor:
             cursor.close()
 
-        # Returns the connection to the pool.
         if connection:
             connection.close()
 
 
-# Allows the OWNER to deactivate a category instead of deleting it.
 @category_bp.route("/<int:category_id>/deactivate", methods=["PUT"])
+@jwt_required()
 @role_required("OWNER")
 def deactivate_category(category_id):
+    store_id, error = check_store()
 
-    # Gets the OWNER's store ID from the JWT token.
-    store_id = get_jwt().get("store_id")
+    if error:
+        return error
 
     connection = None
     cursor = None
 
     try:
-
-        # Gets a database connection.
         connection = get_db_connection()
+        cursor = connection.cursor(dictionary=True)
 
-        # Creates a database cursor.
-        cursor = connection.cursor()
+        cursor.execute("""
+            SELECT
+                category_id,
+                category_name,
+                is_active
+            FROM categories
+            WHERE category_id = %s
+              AND store_id = %s
+        """, (category_id, store_id))
 
-        # Deactivates the category only inside the OWNER's store.
+        category = cursor.fetchone()
+
+        if not category:
+            return jsonify({
+                "message": "Category not found."
+            }), 404
+
+        if category["is_active"] == 0:
+            return jsonify({
+                "message": "Category is already inactive."
+            }), 400
+
         cursor.execute("""
             UPDATE categories
-            SET is_active = FALSE
+            SET
+                is_active = 0,
+                updated_at = CURRENT_TIMESTAMP
             WHERE category_id = %s
-            AND store_id = %s
+              AND store_id = %s
         """, (
             category_id,
             store_id
         ))
 
-        # Checks whether a category was actually updated.
-        if cursor.rowcount == 0:
-            return jsonify({
-                "error": "Category not found in your store."
-            }), 404
-
-        # Saves the deactivation.
         connection.commit()
 
         return jsonify({
@@ -438,85 +419,94 @@ def deactivate_category(category_id):
         }), 200
 
     except Exception as e:
-
-        # Cancels unfinished changes.
         if connection:
             connection.rollback()
 
+        print("DEACTIVATE CATEGORY ERROR:", e)
+
         return jsonify({
+            "message": "Failed to deactivate category.",
             "error": str(e)
         }), 500
 
     finally:
-
-        # Closes the database cursor.
         if cursor:
             cursor.close()
 
-        # Returns the connection to the pool.
         if connection:
             connection.close()
 
 
-# Allows the OWNER to reactivate an inactive category in their store.
-@category_bp.route("/<int:category_id>/activate", methods=["PUT"])
+@category_bp.route("/<int:category_id>/restore", methods=["PUT"])
+@jwt_required()
 @role_required("OWNER")
-def activate_category(category_id):
+def restore_category(category_id):
+    store_id, error = check_store()
 
-    # Gets the OWNER's store ID from the JWT token.
-    store_id = get_jwt().get("store_id")
+    if error:
+        return error
 
     connection = None
     cursor = None
 
     try:
-
-        # Gets a database connection.
         connection = get_db_connection()
+        cursor = connection.cursor(dictionary=True)
 
-        # Creates a database cursor.
-        cursor = connection.cursor()
+        cursor.execute("""
+            SELECT
+                category_id,
+                category_name,
+                is_active
+            FROM categories
+            WHERE category_id = %s
+              AND store_id = %s
+        """, (category_id, store_id))
 
-        # Reactivates the category only inside the OWNER's store.
+        category = cursor.fetchone()
+
+        if not category:
+            return jsonify({
+                "message": "Category not found."
+            }), 404
+
+        if category["is_active"] == 1:
+            return jsonify({
+                "message": "Category is already active."
+            }), 400
+
         cursor.execute("""
             UPDATE categories
-            SET is_active = TRUE
+            SET
+                is_active = 1,
+                updated_at = CURRENT_TIMESTAMP
             WHERE category_id = %s
-            AND store_id = %s
+              AND store_id = %s
         """, (
             category_id,
             store_id
         ))
 
-        # Checks whether the category exists.
-        if cursor.rowcount == 0:
-            return jsonify({
-                "error": "Category not found in your store."
-            }), 404
-
-        # Saves the activation.
         connection.commit()
 
         return jsonify({
-            "message": "Category activated successfully."
+            "message": "Category restored successfully."
         }), 200
 
     except Exception as e:
-
-        # Cancels unfinished changes.
         if connection:
             connection.rollback()
 
+        print("RESTORE CATEGORY ERROR:", e)
+
         return jsonify({
+            "message": "Failed to restore category.",
             "error": str(e)
         }), 500
 
     finally:
-
-        # Closes the database cursor.
         if cursor:
             cursor.close()
 
-        # Returns the connection to the pool.
         if connection:
             connection.close()

@@ -1,164 +1,292 @@
-import { useState } from 'react';
-import axios from 'axios';
+import {
+  BrowserRouter,
+  NavLink,
+  Navigate,
+  Route,
+  Routes,
+  useNavigate,
+} from "react-router-dom";
 
-function App() {
-  const [username, setUsername] = useState('');
-  const [password, setPassword] = useState('');
-  const [token, setToken] = useState('');
-  const [products, setProducts] = useState([]);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState('');
+import Login from "./pages/Login";
+import AdminDashboard from "./pages/AdminDashboard";
+import OwnerDashboard from "./pages/OwnerDashboard";
+import StaffDashboard from "./pages/StaffDashboard";
+import Categories from "./pages/Categories";
+import Products from "./pages/Products";
+import Inventory from "./pages/Inventory";
+import POS from "./pages/POS";
 
-  const login = async (e) => {
-    e.preventDefault();
-    setLoading(true);
-    setError('');
+import {
+  getRole,
+  getUser,
+  isLoggedIn,
+  logout,
+} from "./services/auth";
 
-    try {
-      const response = await axios.post('/api/users/login', {
-        username,
-        password,
-      });
+import "./styles.css";
 
-      const accessToken = response.data.access_token;
-      setToken(accessToken);
-      await fetchProducts(accessToken);
-    } catch (err) {
-      setError(err?.response?.data?.error || 'Login failed.');
-    } finally {
-      setLoading(false);
-    }
-  };
 
-  const fetchProducts = async (authToken) => {
-    try {
-      const response = await axios.get('/api/products/', {
-        headers: {
-          Accept: 'application/json',
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${authToken}`,
-        },
-      });
+function Protected({ children, roles }) {
+  if (!isLoggedIn()) {
+    return <Navigate to="/login" replace />;
+  }
 
-      setProducts(response.data);
-    } catch (err) {
-      const apiError = err?.response?.data?.error || 'Unable to load products.';
-      setError(apiError);
-    }
+  const role = getRole();
+
+  if (roles && !roles.includes(role)) {
+    return <Navigate to="/dashboard" replace />;
+  }
+
+  return children;
+}
+
+
+function Layout() {
+  const navigate = useNavigate();
+
+  const user = getUser();
+  const userRole = getRole();
+
+  const signOut = () => {
+    logout();
+    navigate("/login", { replace: true });
   };
 
   return (
-    <div className="container py-4">
-      <div className="row">
-        <div className="col-md-12">
-          <div className="card shadow">
-            <div className="card-header bg-dark text-white">
-              <div className="d-flex justify-content-between align-items-center">
-                <h4 className="mb-0">Motor Parts Inventory</h4>
-                {token && (
-                  <button className="btn btn-outline-light btn-sm" onClick={() => setToken('')}>
-                    Logout
-                  </button>
-                )}
-              </div>
-            </div>
+    <div className="app">
 
-            <div className="card-body">
-              {!token ? (
-                <form onSubmit={login} className="row g-3 align-items-end">
-                  <div className="col-md-4">
-                    <label className="form-label">Username</label>
-                    <input
-                      type="text"
-                      className="form-control"
-                      value={username}
-                      onChange={(e) => setUsername(e.target.value)}
-                      required
-                    />
-                  </div>
-                  <div className="col-md-4">
-                    <label className="form-label">Password</label>
-                    <input
-                      type="password"
-                      className="form-control"
-                      value={password}
-                      onChange={(e) => setPassword(e.target.value)}
-                      required
-                    />
-                  </div>
-                  <div className="col-md-4">
-                    <button className="btn btn-primary w-100" type="submit" disabled={loading}>
-                      {loading ? 'Loading...' : 'Login'}
-                    </button>
-                  </div>
+      <aside>
 
-                  {error && (
-                    <div className="col-md-12">
-                      <div className="alert alert-danger mb-0">{error}</div>
-                    </div>
-                  )}
-                </form>
-              ) : (
-                <div className="d-flex justify-content-between align-items-center">
-                  <span className="fw-bold">Connected to Motor Parts API</span>
-                </div>
-              )}
-            </div>
-          </div>
+        <h2>SmartInventory</h2>
 
-          {token && (
-            <div className="card mt-4 shadow">
-              <div className="card-body">
-                <div className="d-flex justify-content-between align-items-center mb-3">
-                  <h5 className="mb-0">Product Catalog</h5>
-                  <span className="badge text-bg-success">API Connected</span>
-                </div>
+        <div className="user-box">
 
-                <div className="table-responsive">
-                  <table className="table table-striped table-bordered align-middle">
-                    <thead className="table-dark">
-                      <tr>
-                        <th>#</th>
-                        <th>Product Name</th>
-                        <th>SKU</th>
-                        <th>Part Number</th>
-                        <th>Brand</th>
-                        <th>Category</th>
-                        <th>Selling Price</th>
-                        <th>Reorder Level</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {products.length > 0 ? (
-                        products.map((product, index) => (
-                          <tr key={product.product_id}>
-                            <td>{index + 1}</td>
-                            <td>{product.product_name}</td>
-                            <td>{product.sku}</td>
-                            <td>{product.part_number || '—'}</td>
-                            <td>{product.brand || '—'}</td>
-                            <td>{product.category_name}</td>
-                            <td>{product.selling_price}</td>
-                            <td>{product.reorder_level}</td>
-                          </tr>
-                        ))
-                      ) : (
-                        <tr>
-                          <td colSpan="8" className="text-center">
-                            No products found.
-                          </td>
-                        </tr>
-                      )}
-                    </tbody>
-                  </table>
-                </div>
-              </div>
-            </div>
+          <strong>
+            {user?.full_name || user?.username || "User"}
+          </strong>
+
+          <small>
+            {userRole}
+          </small>
+
+          {user?.store_id && (
+            <small>
+              Store ID: {user.store_id}
+            </small>
           )}
+
         </div>
-      </div>
+
+
+        <nav>
+
+          <NavLink to="/dashboard">
+            Dashboard
+          </NavLink>
+
+
+          {userRole === "ADMIN" && (
+            <NavLink to="/admin/users">
+              Users
+            </NavLink>
+          )}
+
+
+          {(userRole === "OWNER" || userRole === "STAFF") && (
+            <>
+              <NavLink to="/inventory">
+                Inventory
+              </NavLink>
+
+              <NavLink to="/pos">
+                POS / Sales
+              </NavLink>
+            </>
+          )}
+
+
+          {userRole === "OWNER" && (
+            <>
+              <NavLink to="/categories">
+                Categories
+              </NavLink>
+
+              <NavLink to="/products">
+                Products
+              </NavLink>
+            </>
+          )}
+
+        </nav>
+
+
+        <button
+          className="logout"
+          onClick={signOut}
+        >
+          Logout
+        </button>
+
+      </aside>
+
+
+      <main>
+
+        <Routes>
+
+          {/* Dashboard */}
+
+          <Route
+            path="/dashboard"
+            element={
+              <Protected>
+                {userRole === "ADMIN" ? (
+                  <AdminDashboard />
+                ) : userRole === "OWNER" ? (
+                  <OwnerDashboard />
+                ) : (
+                  <StaffDashboard />
+                )}
+              </Protected>
+            }
+          />
+
+
+          {/* Inventory */}
+
+          <Route
+            path="/inventory"
+            element={
+              <Protected roles={["OWNER", "STAFF"]}>
+                <Inventory />
+              </Protected>
+            }
+          />
+
+
+          {/* POS */}
+
+          <Route
+            path="/pos"
+            element={
+              <Protected roles={["OWNER", "STAFF"]}>
+                <POS />
+              </Protected>
+            }
+          />
+
+
+          {/* Categories */}
+
+          <Route
+            path="/categories"
+            element={
+              <Protected roles={["OWNER"]}>
+                <Categories />
+              </Protected>
+            }
+          />
+
+
+          {/* Products */}
+
+          <Route
+            path="/products"
+            element={
+              <Protected roles={["OWNER"]}>
+                <Products />
+              </Protected>
+            }
+          />
+
+
+          {/* Admin Users */}
+
+          <Route
+            path="/admin/users"
+            element={
+              <Protected roles={["ADMIN"]}>
+                <div>
+                  <h2>Users</h2>
+
+                  <p className="muted">
+                    System user management can be connected here.
+                  </p>
+                </div>
+              </Protected>
+            }
+          />
+
+
+          {/* Default */}
+
+          <Route
+            path="/"
+            element={
+              <Navigate
+                to="/dashboard"
+                replace
+              />
+            }
+          />
+
+
+          <Route
+            path="*"
+            element={
+              <Navigate
+                to="/dashboard"
+                replace
+              />
+            }
+          />
+
+        </Routes>
+
+      </main>
+
     </div>
   );
 }
 
-export default App;
+
+export default function App() {
+
+  return (
+    <BrowserRouter>
+
+      <Routes>
+
+        {/* Login */}
+
+        <Route
+          path="/login"
+          element={
+            isLoggedIn() ? (
+              <Navigate
+                to="/dashboard"
+                replace
+              />
+            ) : (
+              <Login />
+            )
+          }
+        />
+
+
+        {/* Protected application */}
+
+        <Route
+          path="/*"
+          element={
+            <Protected>
+              <Layout />
+            </Protected>
+          }
+        />
+
+      </Routes>
+
+    </BrowserRouter>
+  );
+}

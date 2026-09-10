@@ -5,7 +5,6 @@ from routes.user_routes import role_required
 from database import get_db_connection
 
 
-# Creates the Blueprint for product management.
 product_bp = Blueprint(
     "products",
     __name__,
@@ -13,44 +12,51 @@ product_bp = Blueprint(
 )
 
 
-# Gets all products belonging to the logged-in user's store.
+def clean_text(value):
+    if value is None:
+        return ""
+    return str(value).strip()
+
+
+# =========================================================
+# GET ALL PRODUCTS
+# =========================================================
 @product_bp.route("/", methods=["GET"])
 @jwt_required()
 def get_products():
 
-    # Gets the logged-in user's role and store ID from the JWT token.
     claims = get_jwt()
+
     user_role = claims.get("role")
     store_id = claims.get("store_id")
 
-    # Prevents the system ADMIN from managing store products.
     if user_role == "ADMIN":
         return jsonify({
             "error": "ADMIN does not manage store products."
         }), 403
 
-    # Prevents access when the user is not assigned to a store.
     if not store_id:
         return jsonify({
             "error": "Your account is not assigned to a store."
         }), 400
 
-    # Gets optional search and filter values from the URL.
-    search = request.args.get("search", "").strip()
-    category_id = request.args.get("category_id", "").strip()
+    search = clean_text(request.args.get("search"))
+    category_id = clean_text(request.args.get("category_id"))
+
+    status = clean_text(
+        request.args.get("status", "active")
+    ).lower()
+
+    if status not in ["active", "inactive", "all"]:
+        status = "active"
 
     connection = None
     cursor = None
 
     try:
-
-        # Gets a database connection from the connection pool.
         connection = get_db_connection()
-
-        # Creates a cursor that returns rows as dictionaries.
         cursor = connection.cursor(dictionary=True)
 
-        # Gets products and their category names from the user's store.
         sql = """
             SELECT
                 p.product_id,
@@ -63,6 +69,7 @@ def get_products():
                 p.selling_price,
                 p.reorder_level,
                 p.description,
+                p.is_active,
                 p.store_id,
                 p.created_at
             FROM products p
@@ -73,8 +80,20 @@ def get_products():
 
         params = [store_id]
 
-        # Searches products using multiple important product fields.
+        # -------------------------------------------------
+        # STATUS FILTER
+        # -------------------------------------------------
+        if status == "active":
+            sql += " AND p.is_active = 1"
+
+        elif status == "inactive":
+            sql += " AND p.is_active = 0"
+
+        # -------------------------------------------------
+        # SEARCH
+        # -------------------------------------------------
         if search:
+
             sql += """
                 AND (
                     p.product_name LIKE %s
@@ -95,15 +114,21 @@ def get_products():
                 search_value
             ])
 
-        # Filters products by category when a category ID is provided.
+        # -------------------------------------------------
+        # CATEGORY FILTER
+        # -------------------------------------------------
         if category_id:
-            sql += " AND p.category_id = %s"
+
+            sql += """
+                AND p.category_id = %s
+            """
+
             params.append(category_id)
 
-        # Shows the newest products first.
-        sql += " ORDER BY p.product_id DESC"
+        sql += """
+            ORDER BY p.product_id DESC
+        """
 
-        # Executes the product query.
         cursor.execute(sql, tuple(params))
 
         products = cursor.fetchall()
@@ -118,43 +143,44 @@ def get_products():
 
     finally:
 
-        # Closes the database cursor.
         if cursor:
             cursor.close()
 
-        # Returns the database connection to the pool.
         if connection:
             connection.close()
 
 
-# Gets one product belonging to the logged-in user's store.
+# =========================================================
+# GET SINGLE PRODUCT
+# =========================================================
 @product_bp.route("/<int:product_id>", methods=["GET"])
 @jwt_required()
 def get_product(product_id):
 
-    # Gets the logged-in user's role and store ID from the JWT token.
     claims = get_jwt()
+
     user_role = claims.get("role")
     store_id = claims.get("store_id")
 
-    # Prevents the system ADMIN from accessing store products.
     if user_role == "ADMIN":
         return jsonify({
             "error": "ADMIN does not manage store products."
         }), 403
+
+    if not store_id:
+        return jsonify({
+            "error": "Your account is not assigned to a store."
+        }), 400
 
     connection = None
     cursor = None
 
     try:
 
-        # Gets a database connection.
         connection = get_db_connection()
 
-        # Creates a cursor that returns rows as dictionaries.
         cursor = connection.cursor(dictionary=True)
 
-        # Gets the product only when it belongs to the user's store.
         cursor.execute("""
             SELECT
                 p.product_id,
@@ -167,6 +193,7 @@ def get_product(product_id):
                 p.selling_price,
                 p.reorder_level,
                 p.description,
+                p.is_active,
                 p.store_id,
                 p.created_at
             FROM products p
@@ -181,8 +208,8 @@ def get_product(product_id):
 
         product = cursor.fetchone()
 
-        # Returns an error when the product does not belong to the store.
         if not product:
+
             return jsonify({
                 "error": "Product not found."
             }), 404
@@ -197,93 +224,147 @@ def get_product(product_id):
 
     finally:
 
-        # Closes the database cursor.
         if cursor:
             cursor.close()
 
-        # Returns the database connection to the pool.
         if connection:
             connection.close()
 
 
-# Allows the OWNER to create a product in their store.
+# =========================================================
+# CREATE PRODUCT
+# =========================================================
 @product_bp.route("/", methods=["POST"])
 @role_required("OWNER")
 def create_product():
 
-    # Gets the JSON data sent by the OWNER.
     data = request.get_json()
 
     if not data:
+
         return jsonify({
             "error": "Request body is required."
         }), 400
 
-    # Gets and cleans the required product information.
-    product_name = data.get("product_name", "").strip()
-    sku = data.get("sku", "").strip()
+    product_name = clean_text(
+        data.get("product_name")
+    )
+
+    sku = clean_text(
+        data.get("sku")
+    )
+
     category_id = data.get("category_id")
 
-    # Gets the optional product information.
-    part_number = data.get("part_number", "").strip()
-    brand = data.get("brand", "").strip()
-    description = data.get("description", "").strip()
+    part_number = clean_text(
+        data.get("part_number")
+    )
 
-    # Gets the product price and reorder level.
-    selling_price = data.get("selling_price", 0)
-    reorder_level = data.get("reorder_level", 10)
+    brand = clean_text(
+        data.get("brand")
+    )
 
-    # Requires the important product fields.
-    if not product_name or not sku or not category_id:
+    description = clean_text(
+        data.get("description")
+    )
+
+    selling_price = data.get(
+        "selling_price",
+        0
+    )
+
+    reorder_level = data.get(
+        "reorder_level",
+        10
+    )
+
+    # -------------------------------------------------
+    # REQUIRED FIELDS
+    # -------------------------------------------------
+    if not product_name:
+
         return jsonify({
-            "error": "Product name, SKU, and category are required."
+            "error": "Product name is required."
         }), 400
 
-    # Checks that the selling price is valid.
+    if not sku:
+
+        return jsonify({
+            "error": "SKU is required."
+        }), 400
+
+    if not category_id:
+
+        return jsonify({
+            "error": "Category is required."
+        }), 400
+
+    # -------------------------------------------------
+    # SELLING PRICE
+    # -------------------------------------------------
     try:
-        selling_price = float(selling_price)
+
+        selling_price = float(
+            selling_price
+        )
 
         if selling_price < 0:
             raise ValueError
 
     except (ValueError, TypeError):
+
         return jsonify({
-            "error": "Selling price must be a valid positive number."
+            "error": "Selling price must be a valid number."
         }), 400
 
-    # Checks that the reorder level is valid.
+    # -------------------------------------------------
+    # REORDER LEVEL
+    # -------------------------------------------------
     try:
-        reorder_level = int(reorder_level)
+
+        reorder_level = int(
+            reorder_level
+        )
 
         if reorder_level < 0:
             raise ValueError
 
     except (ValueError, TypeError):
+
         return jsonify({
-            "error": "Reorder level must be a valid positive number."
+            "error": "Reorder level must be a valid number."
         }), 400
 
-    # Gets the OWNER's store ID from the JWT token.
-    store_id = get_jwt().get("store_id")
+    store_id = get_jwt().get(
+        "store_id"
+    )
+
+    if not store_id:
+
+        return jsonify({
+            "error": "Your account is not assigned to a store."
+        }), 400
 
     connection = None
     cursor = None
 
     try:
 
-        # Gets a database connection.
         connection = get_db_connection()
 
-        # Creates a cursor that returns rows as dictionaries.
-        cursor = connection.cursor(dictionary=True)
+        cursor = connection.cursor(
+            dictionary=True
+        )
 
-        # Checks whether the selected category belongs to the OWNER's store.
+        # -------------------------------------------------
+        # CHECK CATEGORY
+        # -------------------------------------------------
         cursor.execute("""
             SELECT category_id
             FROM categories
             WHERE category_id = %s
             AND store_id = %s
-            AND is_active = TRUE
+            AND is_active = 1
         """, (
             category_id,
             store_id
@@ -291,15 +372,19 @@ def create_product():
 
         category = cursor.fetchone()
 
-        # Prevents using a category from another store.
         if not category:
+
             return jsonify({
                 "error": "Category not found or does not belong to your store."
             }), 400
 
-        # Checks whether the SKU already exists in the same store.
+        # -------------------------------------------------
+        # CHECK SKU
+        # -------------------------------------------------
         cursor.execute("""
-            SELECT product_id
+            SELECT
+                product_id,
+                is_active
             FROM products
             WHERE sku = %s
             AND store_id = %s
@@ -310,19 +395,25 @@ def create_product():
 
         existing_product = cursor.fetchone()
 
-        # Prevents duplicate SKUs inside the same store.
         if existing_product:
+
+            if existing_product["is_active"] == 0:
+
+                return jsonify({
+                    "error": "This SKU belongs to a product in Trash. Restore that product or use a different SKU."
+                }), 409
+
             return jsonify({
                 "error": "SKU already exists in your store."
             }), 409
 
-        # Closes the dictionary cursor.
+        # -------------------------------------------------
+        # CREATE PRODUCT
+        # -------------------------------------------------
         cursor.close()
 
-        # Creates a normal cursor for inserting the product.
         cursor = connection.cursor()
 
-        # Inserts the product into the OWNER's store.
         cursor.execute("""
             INSERT INTO products (
                 product_name,
@@ -333,9 +424,21 @@ def create_product():
                 selling_price,
                 reorder_level,
                 description,
+                is_active,
                 store_id
             )
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+            VALUES (
+                %s,
+                %s,
+                %s,
+                %s,
+                %s,
+                %s,
+                %s,
+                %s,
+                1,
+                %s
+            )
         """, (
             product_name,
             sku,
@@ -348,23 +451,27 @@ def create_product():
             store_id
         ))
 
-        # Gets the ID of the newly created product.
         product_id = cursor.lastrowid
 
-        # Creates the inventory record with zero stock.
+        # -------------------------------------------------
+        # CREATE INVENTORY RECORD
+        # -------------------------------------------------
         cursor.execute("""
             INSERT INTO inventory (
                 product_id,
                 stock_quantity,
                 store_id
             )
-            VALUES (%s, 0, %s)
+            VALUES (
+                %s,
+                0,
+                %s
+            )
         """, (
             product_id,
             store_id
         ))
 
-        # Saves the product and inventory record.
         connection.commit()
 
         return jsonify({
@@ -374,7 +481,6 @@ def create_product():
 
     except Exception as e:
 
-        # Cancels unfinished database changes.
         if connection:
             connection.rollback()
 
@@ -384,89 +490,136 @@ def create_product():
 
     finally:
 
-        # Closes the database cursor.
         if cursor:
             cursor.close()
 
-        # Returns the database connection to the pool.
         if connection:
             connection.close()
 
 
-# Allows the OWNER to update a product belonging to their store.
+# =========================================================
+# UPDATE PRODUCT
+# =========================================================
 @product_bp.route("/<int:product_id>", methods=["PUT"])
 @role_required("OWNER")
 def update_product(product_id):
 
-    # Gets the JSON data sent by the OWNER.
     data = request.get_json()
 
     if not data:
+
         return jsonify({
             "error": "Request body is required."
         }), 400
 
-    # Gets the updated product information.
-    product_name = data.get("product_name", "").strip()
-    sku = data.get("sku", "").strip()
+    product_name = clean_text(
+        data.get("product_name")
+    )
+
+    sku = clean_text(
+        data.get("sku")
+    )
+
     category_id = data.get("category_id")
 
-    # Gets the optional updated product information.
-    part_number = data.get("part_number", "").strip()
-    brand = data.get("brand", "").strip()
-    description = data.get("description", "").strip()
+    part_number = clean_text(
+        data.get("part_number")
+    )
 
-    # Gets the updated price and reorder level.
-    selling_price = data.get("selling_price", 0)
-    reorder_level = data.get("reorder_level", 10)
+    brand = clean_text(
+        data.get("brand")
+    )
 
-    # Requires the important product fields.
-    if not product_name or not sku or not category_id:
+    description = clean_text(
+        data.get("description")
+    )
+
+    selling_price = data.get(
+        "selling_price",
+        0
+    )
+
+    reorder_level = data.get(
+        "reorder_level",
+        10
+    )
+
+    if not product_name:
+
         return jsonify({
-            "error": "Product name, SKU, and category are required."
+            "error": "Product name is required."
         }), 400
 
-    # Checks that the selling price is valid.
+    if not sku:
+
+        return jsonify({
+            "error": "SKU is required."
+        }), 400
+
+    if not category_id:
+
+        return jsonify({
+            "error": "Category is required."
+        }), 400
+
     try:
-        selling_price = float(selling_price)
+
+        selling_price = float(
+            selling_price
+        )
 
         if selling_price < 0:
             raise ValueError
 
     except (ValueError, TypeError):
+
         return jsonify({
-            "error": "Selling price must be a valid positive number."
+            "error": "Selling price must be a valid number."
         }), 400
 
-    # Checks that the reorder level is valid.
     try:
-        reorder_level = int(reorder_level)
+
+        reorder_level = int(
+            reorder_level
+        )
 
         if reorder_level < 0:
             raise ValueError
 
     except (ValueError, TypeError):
+
         return jsonify({
-            "error": "Reorder level must be a valid positive number."
+            "error": "Reorder level must be a valid number."
         }), 400
 
-    # Gets the OWNER's store ID from the JWT token.
-    store_id = get_jwt().get("store_id")
+    store_id = get_jwt().get(
+        "store_id"
+    )
+
+    if not store_id:
+
+        return jsonify({
+            "error": "Your account is not assigned to a store."
+        }), 400
 
     connection = None
     cursor = None
 
     try:
 
-        # Gets a database connection.
         connection = get_db_connection()
 
-        # Creates a dictionary cursor.
-        cursor = connection.cursor(dictionary=True)
+        cursor = connection.cursor(
+            dictionary=True
+        )
 
-        # Checks whether the product belongs to the OWNER's store.
+        # -------------------------------------------------
+        # CHECK PRODUCT
+        # -------------------------------------------------
         cursor.execute("""
-            SELECT product_id
+            SELECT
+                product_id,
+                is_active
             FROM products
             WHERE product_id = %s
             AND store_id = %s
@@ -477,19 +630,21 @@ def update_product(product_id):
 
         product = cursor.fetchone()
 
-        # Prevents updating a product from another store.
         if not product:
+
             return jsonify({
                 "error": "Product not found in your store."
             }), 404
 
-        # Checks whether the selected category belongs to the same store.
+        # -------------------------------------------------
+        # CHECK CATEGORY
+        # -------------------------------------------------
         cursor.execute("""
             SELECT category_id
             FROM categories
             WHERE category_id = %s
             AND store_id = %s
-            AND is_active = TRUE
+            AND is_active = 1
         """, (
             category_id,
             store_id
@@ -497,13 +652,15 @@ def update_product(product_id):
 
         category = cursor.fetchone()
 
-        # Prevents assigning the product to another store's category.
         if not category:
+
             return jsonify({
-                "error": "Category not found in your store."
+                "error": "Category not found or is inactive."
             }), 400
 
-        # Checks for duplicate SKUs inside the same store.
+        # -------------------------------------------------
+        # CHECK DUPLICATE SKU
+        # -------------------------------------------------
         cursor.execute("""
             SELECT product_id
             FROM products
@@ -518,19 +675,19 @@ def update_product(product_id):
 
         duplicate_sku = cursor.fetchone()
 
-        # Prevents duplicate SKUs.
         if duplicate_sku:
+
             return jsonify({
                 "error": "SKU already exists in your store."
             }), 409
 
-        # Closes the dictionary cursor.
         cursor.close()
 
-        # Creates a normal cursor.
         cursor = connection.cursor()
 
-        # Updates the product.
+        # -------------------------------------------------
+        # UPDATE PRODUCT
+        # -------------------------------------------------
         cursor.execute("""
             UPDATE products
             SET
@@ -557,7 +714,6 @@ def update_product(product_id):
             store_id
         ))
 
-        # Saves the updated product.
         connection.commit()
 
         return jsonify({
@@ -566,7 +722,6 @@ def update_product(product_id):
 
     except Exception as e:
 
-        # Cancels unfinished database changes.
         if connection:
             connection.rollback()
 
@@ -576,37 +731,53 @@ def update_product(product_id):
 
     finally:
 
-        # Closes the database cursor.
         if cursor:
             cursor.close()
 
-        # Returns the database connection to the pool.
         if connection:
             connection.close()
 
 
-# Allows the OWNER to permanently delete a product from their store.
-@product_bp.route("/<int:product_id>", methods=["DELETE"])
+# =========================================================
+# SOFT DELETE / MOVE TO TRASH
+# =========================================================
+@product_bp.route(
+    "/<int:product_id>/deactivate",
+    methods=["PUT"]
+)
 @role_required("OWNER")
-def delete_product(product_id):
+def deactivate_product(product_id):
 
-    # Gets the OWNER's store ID from the JWT token.
-    store_id = get_jwt().get("store_id")
+    store_id = get_jwt().get(
+        "store_id"
+    )
+
+    if not store_id:
+
+        return jsonify({
+            "error": "Your account is not assigned to a store."
+        }), 400
 
     connection = None
     cursor = None
 
     try:
 
-        # Gets a database connection.
         connection = get_db_connection()
 
-        # Creates a database cursor.
-        cursor = connection.cursor()
+        cursor = connection.cursor(
+            dictionary=True
+        )
 
-        # Deletes the product only when it belongs to the OWNER's store.
+        # -------------------------------------------------
+        # CHECK PRODUCT
+        # -------------------------------------------------
         cursor.execute("""
-            DELETE FROM products
+            SELECT
+                product_id,
+                product_name,
+                is_active
+            FROM products
             WHERE product_id = %s
             AND store_id = %s
         """, (
@@ -614,22 +785,41 @@ def delete_product(product_id):
             store_id
         ))
 
-        # Returns an error when the product does not exist in the store.
-        if cursor.rowcount == 0:
+        product = cursor.fetchone()
+
+        if not product:
+
             return jsonify({
                 "error": "Product not found in your store."
             }), 404
 
-        # Saves the deletion.
+        if product["is_active"] == 0:
+
+            return jsonify({
+                "error": "Product is already in Trash."
+            }), 400
+
+        # -------------------------------------------------
+        # SOFT DELETE
+        # -------------------------------------------------
+        cursor.execute("""
+            UPDATE products
+            SET is_active = 0
+            WHERE product_id = %s
+            AND store_id = %s
+        """, (
+            product_id,
+            store_id
+        ))
+
         connection.commit()
 
         return jsonify({
-            "message": "Product deleted successfully."
+            "message": "Product moved to Trash successfully."
         }), 200
 
     except Exception as e:
 
-        # Cancels unfinished database changes.
         if connection:
             connection.rollback()
 
@@ -639,10 +829,119 @@ def delete_product(product_id):
 
     finally:
 
-        # Closes the database cursor.
         if cursor:
             cursor.close()
 
-        # Returns the connection to the pool.
+        if connection:
+            connection.close()
+
+
+# =========================================================
+# RESTORE PRODUCT
+# =========================================================
+@product_bp.route(
+    "/<int:product_id>/restore",
+    methods=["PUT"]
+)
+@role_required("OWNER")
+def restore_product(product_id):
+
+    store_id = get_jwt().get(
+        "store_id"
+    )
+
+    if not store_id:
+
+        return jsonify({
+            "error": "Your account is not assigned to a store."
+        }), 400
+
+    connection = None
+    cursor = None
+
+    try:
+
+        connection = get_db_connection()
+
+        cursor = connection.cursor(
+            dictionary=True
+        )
+
+        # -------------------------------------------------
+        # CHECK PRODUCT
+        # -------------------------------------------------
+        cursor.execute("""
+            SELECT
+                p.product_id,
+                p.product_name,
+                p.category_id,
+                p.is_active,
+                c.is_active AS category_active
+            FROM products p
+            INNER JOIN categories c
+                ON p.category_id = c.category_id
+            WHERE p.product_id = %s
+            AND p.store_id = %s
+        """, (
+            product_id,
+            store_id
+        ))
+
+        product = cursor.fetchone()
+
+        if not product:
+
+            return jsonify({
+                "error": "Product not found in your store."
+            }), 404
+
+        if product["is_active"] == 1:
+
+            return jsonify({
+                "error": "Product is already active."
+            }), 400
+
+        # -------------------------------------------------
+        # CATEGORY MUST BE ACTIVE
+        # -------------------------------------------------
+        if product["category_active"] == 0:
+
+            return jsonify({
+                "error": "Cannot restore this product because its category is inactive. Restore the category first."
+            }), 400
+
+        # -------------------------------------------------
+        # RESTORE
+        # -------------------------------------------------
+        cursor.execute("""
+            UPDATE products
+            SET is_active = 1
+            WHERE product_id = %s
+            AND store_id = %s
+        """, (
+            product_id,
+            store_id
+        ))
+
+        connection.commit()
+
+        return jsonify({
+            "message": "Product restored successfully."
+        }), 200
+
+    except Exception as e:
+
+        if connection:
+            connection.rollback()
+
+        return jsonify({
+            "error": str(e)
+        }), 500
+
+    finally:
+
+        if cursor:
+            cursor.close()
+
         if connection:
             connection.close()

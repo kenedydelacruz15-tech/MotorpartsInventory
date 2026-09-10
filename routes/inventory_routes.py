@@ -1,10 +1,10 @@
 from flask import Blueprint, request, jsonify
 from flask_jwt_extended import jwt_required, get_jwt
 
+from routes.user_routes import role_required
 from database import get_db_connection
 
 
-# Creates the Blueprint for inventory management.
 inventory_bp = Blueprint(
     "inventory",
     __name__,
@@ -12,49 +12,56 @@ inventory_bp = Blueprint(
 )
 
 
-# Gets all inventory records belonging to the logged-in user's store.
+# =========================================================
+# GET INVENTORY
+# =========================================================
 @inventory_bp.route("/", methods=["GET"])
 @jwt_required()
 def get_inventory():
 
-    # Gets the logged-in user's role and store ID from the JWT token.
     claims = get_jwt()
-    user_role = claims.get("role")
+
+    role = claims.get("role")
     store_id = claims.get("store_id")
 
-    # Prevents the system ADMIN from managing store inventory.
-    if user_role == "ADMIN":
+    if role == "ADMIN":
         return jsonify({
             "error": "ADMIN does not manage store inventory."
         }), 403
 
-    # Prevents access when the user is not assigned to a store.
     if not store_id:
         return jsonify({
             "error": "Your account is not assigned to a store."
         }), 400
 
-    # Gets the optional search value.
-    search = request.args.get("search", "").strip()
+    search = request.args.get(
+        "search",
+        ""
+    ).strip()
 
-    # Gets the optional category filter.
-    category_id = request.args.get("category_id", "").strip()
+    status = request.args.get(
+        "status",
+        "active"
+    ).strip().lower()
 
-    # Gets the optional stock status filter.
-    stock_status = request.args.get("stock_status", "").strip().lower()
+    if status not in [
+        "active",
+        "inactive",
+        "all"
+    ]:
+        status = "active"
 
     connection = None
     cursor = None
 
     try:
 
-        # Gets a database connection from the connection pool.
         connection = get_db_connection()
 
-        # Creates a cursor that returns database rows as dictionaries.
-        cursor = connection.cursor(dictionary=True)
+        cursor = connection.cursor(
+            dictionary=True
+        )
 
-        # Gets inventory together with product and category information.
         sql = """
             SELECT
                 i.inventory_id,
@@ -63,84 +70,68 @@ def get_inventory():
                 p.sku,
                 p.part_number,
                 p.brand,
-                p.category_id,
-                c.category_name,
                 p.selling_price,
                 p.reorder_level,
+                c.category_id,
+                c.category_name,
                 i.stock_quantity,
+                i.is_active,
                 i.store_id,
                 i.updated_at
             FROM inventory i
+
             INNER JOIN products p
                 ON i.product_id = p.product_id
+
             INNER JOIN categories c
                 ON p.category_id = c.category_id
+
             WHERE i.store_id = %s
         """
 
         params = [store_id]
 
-        # Searches inventory using important product information.
+        if status == "active":
+
+            sql += """
+                AND i.is_active = 1
+                AND p.is_active = 1
+            """
+
+        elif status == "inactive":
+
+            sql += """
+                AND i.is_active = 0
+            """
+
         if search:
 
             sql += """
                 AND (
                     p.product_name LIKE %s
                     OR p.sku LIKE %s
-                    OR p.part_number LIKE %s
                     OR p.brand LIKE %s
                     OR c.category_name LIKE %s
                 )
             """
 
-            search_value = f"%{search}%"
+            value = f"%{search}%"
 
             params.extend([
-                search_value,
-                search_value,
-                search_value,
-                search_value,
-                search_value
+                value,
+                value,
+                value,
+                value
             ])
 
-        # Filters inventory by category.
-        if category_id:
-
-            sql += """
-                AND p.category_id = %s
-            """
-
-            params.append(category_id)
-
-        # Shows only products with zero stock.
-        if stock_status == "out_of_stock":
-
-            sql += """
-                AND i.stock_quantity = 0
-            """
-
-        # Shows products that reached or passed their reorder level.
-        elif stock_status == "low_stock":
-
-            sql += """
-                AND i.stock_quantity > 0
-                AND i.stock_quantity <= p.reorder_level
-            """
-
-        # Shows products with stock above their reorder level.
-        elif stock_status == "in_stock":
-
-            sql += """
-                AND i.stock_quantity > p.reorder_level
-            """
-
-        # Shows the inventory alphabetically by product name.
         sql += """
-            ORDER BY p.product_name ASC
+            ORDER BY i.inventory_id DESC
         """
 
-        # Executes the inventory query.
-        cursor.execute(sql, tuple(params))
+        cursor.execute(
+            sql,
+            tuple(params)
+        )
 
         inventory = cursor.fetchall()
 
@@ -154,49 +145,45 @@ def get_inventory():
 
     finally:
 
-        # Closes the database cursor.
         if cursor:
             cursor.close()
 
-        # Returns the database connection to the pool.
         if connection:
             connection.close()
 
 
-# Gets one inventory record belonging to the logged-in user's store.
-@inventory_bp.route("/<int:product_id>", methods=["GET"])
+# =========================================================
+# GET SINGLE INVENTORY
+# =========================================================
+@inventory_bp.route(
+    "/<int:inventory_id>",
+    methods=["GET"]
+)
 @jwt_required()
-def get_inventory_product(product_id):
+def get_inventory_item(inventory_id):
 
-    # Gets the logged-in user's role and store ID from the JWT token.
     claims = get_jwt()
-    user_role = claims.get("role")
+
+    role = claims.get("role")
     store_id = claims.get("store_id")
 
-    # Prevents the system ADMIN from accessing store inventory.
-    if user_role == "ADMIN":
+    if role == "ADMIN":
+
         return jsonify({
             "error": "ADMIN does not manage store inventory."
         }), 403
-
-    # Prevents access when the user is not assigned to a store.
-    if not store_id:
-        return jsonify({
-            "error": "Your account is not assigned to a store."
-        }), 400
 
     connection = None
     cursor = None
 
     try:
 
-        # Gets a database connection from the connection pool.
         connection = get_db_connection()
 
-        # Creates a cursor that returns rows as dictionaries.
-        cursor = connection.cursor(dictionary=True)
+        cursor = connection.cursor(
+            dictionary=True
+        )
 
-        # Gets the inventory record only when it belongs to the user's store.
         cursor.execute("""
             SELECT
                 i.inventory_id,
@@ -205,34 +192,38 @@ def get_inventory_product(product_id):
                 p.sku,
                 p.part_number,
                 p.brand,
-                p.category_id,
-                c.category_name,
                 p.selling_price,
                 p.reorder_level,
+                c.category_id,
+                c.category_name,
                 i.stock_quantity,
+                i.is_active,
                 i.store_id,
                 i.updated_at
             FROM inventory i
+
             INNER JOIN products p
                 ON i.product_id = p.product_id
+
             INNER JOIN categories c
                 ON p.category_id = c.category_id
-            WHERE i.product_id = %s
+
+            WHERE i.inventory_id = %s
             AND i.store_id = %s
         """, (
-            product_id,
+            inventory_id,
             store_id
         ))
 
-        inventory = cursor.fetchone()
+        item = cursor.fetchone()
 
-        # Returns an error when the product inventory does not exist.
-        if not inventory:
+        if not item:
+
             return jsonify({
                 "error": "Inventory record not found."
             }), 404
 
-        return jsonify(inventory), 200
+        return jsonify(item), 200
 
     except Exception as e:
 
@@ -242,93 +233,118 @@ def get_inventory_product(product_id):
 
     finally:
 
-        # Closes the database cursor.
         if cursor:
             cursor.close()
 
-        # Returns the database connection to the pool.
         if connection:
             connection.close()
 
 
-# Gets a summary of the logged-in store's inventory.
-@inventory_bp.route("/summary", methods=["GET"])
-@jwt_required()
-def get_inventory_summary():
+# =========================================================
+# UPDATE INVENTORY
+# OWNER ONLY
+# =========================================================
+@inventory_bp.route(
+    "/<int:inventory_id>",
+    methods=["PUT"]
+)
+@role_required("OWNER")
+def update_inventory(inventory_id):
 
-    # Gets the logged-in user's role and store ID from the JWT token.
-    claims = get_jwt()
-    user_role = claims.get("role")
-    store_id = claims.get("store_id")
+    data = request.get_json()
 
-    # Prevents the system ADMIN from viewing store inventory summaries.
-    if user_role == "ADMIN":
+    if not data:
+
         return jsonify({
-            "error": "ADMIN does not manage store inventory."
-        }), 403
-
-    # Prevents access when the user is not assigned to a store.
-    if not store_id:
-        return jsonify({
-            "error": "Your account is not assigned to a store."
+            "error": "Request body is required."
         }), 400
+
+    try:
+
+        stock_quantity = int(
+            data.get("stock_quantity")
+        )
+
+        if stock_quantity < 0:
+
+            raise ValueError
+
+    except (ValueError, TypeError):
+
+        return jsonify({
+            "error": "Stock quantity must be a valid non-negative number."
+        }), 400
+
+    store_id = get_jwt().get(
+        "store_id"
+    )
 
     connection = None
     cursor = None
 
     try:
 
-        # Gets a database connection from the connection pool.
         connection = get_db_connection()
 
-        # Creates a cursor that returns rows as dictionaries.
-        cursor = connection.cursor(dictionary=True)
+        cursor = connection.cursor(
+            dictionary=True
+        )
 
-        # Calculates inventory totals for the logged-in user's store only.
         cursor.execute("""
             SELECT
-                COUNT(*) AS total_products,
+                inventory_id,
+                product_id,
+                stock_quantity,
+                is_active
+            FROM inventory
+            WHERE inventory_id = %s
+            AND store_id = %s
+        """, (
+            inventory_id,
+            store_id
+        ))
 
-                COALESCE(SUM(i.stock_quantity), 0) AS total_stock,
+        item = cursor.fetchone()
 
-                SUM(
-                    CASE
-                        WHEN i.stock_quantity = 0
-                        THEN 1
-                        ELSE 0
-                    END
-                ) AS out_of_stock,
+        if not item:
 
-                SUM(
-                    CASE
-                        WHEN i.stock_quantity > 0
-                        AND i.stock_quantity <= p.reorder_level
-                        THEN 1
-                        ELSE 0
-                    END
-                ) AS low_stock,
+            return jsonify({
+                "error": "Inventory record not found."
+            }), 404
 
-                SUM(
-                    CASE
-                        WHEN i.stock_quantity > p.reorder_level
-                        THEN 1
-                        ELSE 0
-                    END
-                ) AS in_stock
+        previous_quantity = item[
+            "stock_quantity"
+        ]
 
-            FROM inventory i
+        cursor.close()
 
-            INNER JOIN products p
-                ON i.product_id = p.product_id
+        cursor = connection.cursor()
 
-            WHERE i.store_id = %s
-        """, (store_id,))
+        cursor.execute("""
+            UPDATE inventory
+            SET stock_quantity = %s
+            WHERE inventory_id = %s
+            AND store_id = %s
+        """, (
+            stock_quantity,
+            inventory_id,
+            store_id
+        ))
 
-        summary = cursor.fetchone()
+        connection.commit()
 
-        return jsonify(summary), 200
+        return jsonify({
+            "message": "Inventory updated successfully.",
+            "previous_quantity":
+                previous_quantity,
+            "new_quantity":
+                stock_quantity
+        }), 200
 
     except Exception as e:
+
+        if connection:
+            connection.rollback()
 
         return jsonify({
             "error": str(e)
@@ -336,10 +352,166 @@ def get_inventory_summary():
 
     finally:
 
-        # Closes the database cursor.
         if cursor:
             cursor.close()
 
-        # Returns the database connection to the pool.
+        if connection:
+            connection.close()
+
+
+# =========================================================
+# SOFT DELETE INVENTORY
+# =========================================================
+@inventory_bp.route(
+    "/<int:inventory_id>/deactivate",
+    methods=["PUT"]
+)
+@role_required("OWNER")
+def deactivate_inventory(inventory_id):
+
+    store_id = get_jwt().get(
+        "store_id"
+    )
+
+    connection = None
+    cursor = None
+
+    try:
+
+        connection = get_db_connection()
+
+        cursor = connection.cursor(
+            dictionary=True
+        )
+
+        cursor.execute("""
+            SELECT
+                inventory_id,
+                product_id,
+                stock_quantity,
+                is_active
+            FROM inventory
+            WHERE inventory_id = %s
+            AND store_id = %s
+        """, (
+            inventory_id,
+            store_id
+        ))
+
+        item = cursor.fetchone()
+
+        if not item:
+
+            return jsonify({
+                "error": "Inventory record not found."
+            }), 404
+
+        if item["is_active"] == 0:
+
+            return jsonify({
+                "error": "Inventory record is already in Trash."
+            }), 400
+
+        # Prevent hiding inventory that still has stock
+        if item["stock_quantity"] > 0:
+
+            return jsonify({
+                "error": "Cannot move inventory to Trash while stock quantity is greater than 0."
+            }), 400
+
+        cursor.execute("""
+            UPDATE inventory
+            SET is_active = 0
+            WHERE inventory_id = %s
+            AND store_id = %s
+        """, (
+            inventory_id,
+            store_id
+        ))
+
+        connection.commit()
+
+        return jsonify({
+            "message": "Inventory record moved to Trash."
+        }), 200
+
+    except Exception as e:
+
+        if connection:
+            connection.rollback()
+
+        return jsonify({
+            "error": str(e)
+        }), 500
+
+    finally:
+
+        if cursor:
+            cursor.close()
+
+        if connection:
+            connection.close()
+
+
+# =========================================================
+# RESTORE INVENTORY
+# =========================================================
+@inventory_bp.route(
+    "/<int:inventory_id>/restore",
+    methods=["PUT"]
+)
+@role_required("OWNER")
+def restore_inventory(inventory_id):
+
+    store_id = get_jwt().get(
+        "store_id"
+    )
+
+    connection = None
+    cursor = None
+
+    try:
+
+        connection = get_db_connection()
+
+        cursor = connection.cursor()
+
+        cursor.execute("""
+            UPDATE inventory
+            SET is_active = 1
+            WHERE inventory_id = %s
+            AND store_id = %s
+            AND is_active = 0
+        """, (
+            inventory_id,
+            store_id
+        ))
+
+        if cursor.rowcount == 0:
+
+            return jsonify({
+                "error": "Inventory record not found or already active."
+            }), 404
+
+        connection.commit()
+
+        return jsonify({
+            "message": "Inventory restored successfully."
+        }), 200
+
+    except Exception as e:
+
+        if connection:
+            connection.rollback()
+
+        return jsonify({
+            "error": str(e)
+        }), 500
+
+    finally:
+
+        if cursor:
+            cursor.close()
+
         if connection:
             connection.close()

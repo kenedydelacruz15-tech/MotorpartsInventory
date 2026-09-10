@@ -1,457 +1,681 @@
+from decimal import Decimal, InvalidOperation
+
 from flask import Blueprint, jsonify, request
-from flask_jwt_extended import jwt_required, get_jwt_identity
+from flask_jwt_extended import jwt_required, get_jwt_identity, get_jwt
+
 from database import get_db_connection
-from datetime import datetime
+from routes.user_routes import role_required
 
 
-sales_bp = Blueprint("sales_bp", __name__)
+sales_bp = Blueprint("sales", __name__, url_prefix="/api/sales")
 
 
-# Get all sales belonging to the logged-in store.
-@sales_bp.route("/sales", methods=["GET"])
-@jwt_required()
-def get_sales():
+@sales_bp.route("/", methods=["POST"])
+@role_required("OWNER", "STAFF")
+def create_sale():
 
-    current_store_id = get_jwt_identity()
+    data = request.get_json()
 
-    db = get_db_connection()
-    cursor = db.cursor(dictionary=True)
+    if not data:
+        return jsonify({
+            "error": "Request body is required."
+        }), 400
+
+    items = data.get("items")
+
+    if not isinstance(items, list) or len(items) == 0:
+        return jsonify({
+            "error": "At least one product is required."
+        }), 400
+
+    payment_method = str(
+        data.get("payment_method", "CASH")
+    ).strip().upper()
+
+    if not payment_method:
+        payment_method = "CASH"
 
     try:
-        cursor.execute(
-            """
-            SELECT
-                sale_id,
-                total_sales,
-                sale_date
-            FROM sales
-            WHERE store_id = %s
-            ORDER BY sale_id DESC
-            """,
-            (current_store_id,)
+        payment_amount = Decimal(
+            str(data.get("payment_amount", "0"))
+        )
+    except (InvalidOperation, TypeError):
+        return jsonify({
+            "error": "Invalid payment amount."
+        }), 400
+
+    if payment_amount < 0:
+        return jsonify({
+            "error": "Payment amount cannot be negative."
+        }), 400
+
+    user_id = int(get_jwt_identity())
+    claims = get_jwt()
+
+    store_id = claims.get("store_id")
+
+    if not store_id:
+        return jsonify({
+            "error": "Your account is not assigned to a store."
+        }), 403
+
+    connection = None
+    cursor = None
+
+    try:
+        connection = get_db_connection()
+
+        cursor = connection.cursor(dictionary=True)
+
+        connection.start_transaction()
+
+        prepared_items = []
+        product_ids = set()
+
+        for item in items:
+
+            try:
+                product_id = int(item.get("product_id"))
+                quantity = int(item.get("quantity"))
+            except (TypeError, ValueError):
+                connection.rollback()
+
+                return jsonify({
+                    "error": "Product ID and quantity must be valid numbers."
+                }), 400
+
+            if product_id in product_ids:
+                connection.rollback()
+
+                return jsonify({
+                    "error": f"Product {product_id} appears more than once."
+                }), 400
+
+            product_ids.add(product_id)
+
+            if quantity <= 0:
+                connection.rollback()
+
+                return jsonify({
+                    "error": "Quantity must be greater than zero."
+                }), 400
+
+            cursor.execute("""
+                SELECT
+                    p.product_id,
+                    p.product_name,
+                    p.sku,
+                    p.selling_price,
+                    i.stock_quantity
+                FROM products p
+                INNER JOIN inventory i
+                    ON i.product_id = p.product_id
+                    AND i.store_id = p.store_id
+                WHERE p.product_id = %s
+                  AND p.store_id = %s
+                FOR UPDATE
+            """, (
+                product_id,
+                store_id
+            ))
+
+            product = cursor.fetchone()
+
+            if not product:
+                connection.rollback()
+
+                return jsonify({
+                    "error": f"Product {product_id} was not found in your store."
+                }), 404
+
+            current_stock = int(product["stock_quantity"])
+
+            if quantity > current_stock:
+                connection.rollback()
+
+                return jsonify({
+                    "error": (
+                        f"Insufficient stock for "
+                        f"{product['product_name']}. "
+                        f"Available stock: {current_stock}."
+                    )
+                }), 400
+
+            unit_price = Decimal(
+                str(product["selling_price"])
+            )
+
+            subtotal = unit_price * quantity
+
+            prepared_items.append({
+                "product_id": product_id,
+                "product_name": product["product_name"],
+                "sku": product["sku"],
+                "quantity": quantity,
+                "unit_price": unit_price,
+                "subtotal": subtotal,
+                "previous_quantity": current_stock,
+                "new_quantity": current_stock - quantity
+            })
+
+        total_sales = sum(
+            item["subtotal"]
+            for item in prepared_items
         )
 
-        sales = cursor.fetchall()
+        if payment_amount < total_sales:
+
+            connection.rollback()
+
+            return jsonify({
+                "error": "Insufficient payment.",
+                "total_sales": float(total_sales),
+                "payment_amount": float(payment_amount),
+                "shortage": float(
+                    total_sales - payment_amount
+                )
+            }), 400
+
+        change_amount = payment_amount - total_sales
+
+        cursor.execute("""
+            INSERT INTO sales (
+                store_id,
+                user_id,
+                total_sales,
+                payment_amount,
+                change_amount,
+                payment_method
+            )
+            VALUES (%s, %s, %s, %s, %s, %s)
+        """, (
+            store_id,
+            user_id,
+            total_sales,
+            payment_amount,
+            change_amount,
+            payment_method
+        ))
+
+        sale_id = cursor.lastrowid
+
+        for item in prepared_items:
+
+            cursor.execute("""
+                INSERT INTO sale_items (
+                    sale_id,
+                    product_id,
+                    store_id,
+                    quantity,
+                    unit_price,
+                    subtotal
+                )
+                VALUES (%s, %s, %s, %s, %s, %s)
+            """, (
+                sale_id,
+                item["product_id"],
+                store_id,
+                item["quantity"],
+                item["unit_price"],
+                item["subtotal"]
+            ))
+
+            cursor.execute("""
+                UPDATE inventory
+                SET stock_quantity = %s
+                WHERE product_id = %s
+                  AND store_id = %s
+            """, (
+                item["new_quantity"],
+                item["product_id"],
+                store_id
+            ))
+
+            cursor.execute("""
+                INSERT INTO stock_movements (
+                    product_id,
+                    movement_type,
+                    quantity,
+                    previous_quantity,
+                    new_quantity,
+                    reference_id,
+                    store_id
+                )
+                VALUES (
+                    %s,
+                    'SALE',
+                    %s,
+                    %s,
+                    %s,
+                    %s,
+                    %s
+                )
+            """, (
+                item["product_id"],
+                item["quantity"],
+                item["previous_quantity"],
+                item["new_quantity"],
+                sale_id,
+                store_id
+            ))
+
+        connection.commit()
 
         return jsonify({
-            "sale_count": len(sales),
-            "sales": sales
-        }), 200
+            "message": "Sale completed successfully.",
+            "sale": {
+                "sale_id": sale_id,
+                "store_id": store_id,
+                "user_id": user_id,
+                "total_sales": float(total_sales),
+                "payment_amount": float(payment_amount),
+                "change_amount": float(change_amount),
+                "payment_method": payment_method,
+                "items": [
+                    {
+                        "product_id": item["product_id"],
+                        "product_name": item["product_name"],
+                        "sku": item["sku"],
+                        "quantity": item["quantity"],
+                        "unit_price": float(item["unit_price"]),
+                        "subtotal": float(item["subtotal"])
+                    }
+                    for item in prepared_items
+                ]
+            }
+        }), 201
 
     except Exception as e:
+
+        if connection:
+            connection.rollback()
+
         return jsonify({
             "error": str(e)
         }), 500
 
     finally:
-        cursor.close()
-        db.close()
+
+        if cursor:
+            cursor.close()
+
+        if connection:
+            connection.close()
 
 
-# Get one sale with its products and batch allocations.
-@sales_bp.route("/sales/<int:sale_id>", methods=["GET"])
+@sales_bp.route("/", methods=["GET"])
 @jwt_required()
-def get_sale_details(sale_id):
+def get_sales():
 
-    current_store_id = get_jwt_identity()
+    claims = get_jwt()
+    role = claims.get("role")
+    store_id = claims.get("store_id")
 
-    db = get_db_connection()
-    cursor = db.cursor(dictionary=True)
+    if role == "ADMIN":
+        return jsonify({
+            "error": "ADMIN cannot access store sales."
+        }), 403
+
+    connection = None
+    cursor = None
 
     try:
-        # Check that the sale belongs to the logged-in store.
-        cursor.execute(
-            """
+        connection = get_db_connection()
+
+        cursor = connection.cursor(dictionary=True)
+
+        cursor.execute("""
             SELECT
-                sale_id,
-                total_sales,
-                sale_date
-            FROM sales
-            WHERE sale_id = %s
-              AND store_id = %s
-            """,
-            (sale_id, current_store_id)
-        )
+                s.sale_id,
+                s.store_id,
+                s.user_id,
+                u.full_name AS cashier,
+                s.total_sales,
+                s.payment_amount,
+                s.change_amount,
+                s.payment_method,
+                s.sale_date,
+                s.status
+            FROM sales s
+            LEFT JOIN users u
+                ON u.user_id = s.user_id
+            WHERE s.store_id = %s
+            ORDER BY s.sale_date DESC
+        """, (
+            store_id,
+        ))
+
+        sales = cursor.fetchall()
+
+        for sale in sales:
+
+            sale["total_sales"] = float(
+                sale["total_sales"]
+            )
+
+            sale["payment_amount"] = float(
+                sale["payment_amount"]
+            )
+
+            sale["change_amount"] = float(
+                sale["change_amount"]
+            )
+
+        return jsonify({
+            "sales": sales
+        }), 200
+
+    except Exception as e:
+
+        return jsonify({
+            "error": str(e)
+        }), 500
+
+    finally:
+
+        if cursor:
+            cursor.close()
+
+        if connection:
+            connection.close()
+
+
+@sales_bp.route("/<int:sale_id>", methods=["GET"])
+@jwt_required()
+def get_sale(sale_id):
+
+    claims = get_jwt()
+    role = claims.get("role")
+    store_id = claims.get("store_id")
+
+    if role == "ADMIN":
+        return jsonify({
+            "error": "ADMIN cannot access store sales."
+        }), 403
+
+    connection = None
+    cursor = None
+
+    try:
+        connection = get_db_connection()
+
+        cursor = connection.cursor(dictionary=True)
+
+        cursor.execute("""
+            SELECT
+                s.sale_id,
+                s.store_id,
+                s.user_id,
+                u.full_name AS cashier,
+                s.total_sales,
+                s.payment_amount,
+                s.change_amount,
+                s.payment_method,
+                s.sale_date,
+                s.status
+            FROM sales s
+            LEFT JOIN users u
+                ON u.user_id = s.user_id
+            WHERE s.sale_id = %s
+              AND s.store_id = %s
+        """, (
+            sale_id,
+            store_id
+        ))
 
         sale = cursor.fetchone()
 
         if not sale:
             return jsonify({
-                "error": "Sale not found or unauthorized"
+                "error": "Sale not found."
             }), 404
 
-        # Get all items included in the sale.
-        cursor.execute(
-            """
+        cursor.execute("""
             SELECT
                 si.sale_item_id,
                 si.product_id,
                 p.product_name,
+                p.sku,
                 si.quantity,
-                si.price,
+                si.unit_price,
                 si.subtotal
             FROM sale_items si
-
-            JOIN products p
-                ON si.product_id = p.product_id
-
+            INNER JOIN products p
+                ON p.product_id = si.product_id
             WHERE si.sale_id = %s
-              AND p.store_id = %s
+              AND si.store_id = %s
+            ORDER BY si.sale_item_id
+        """, (
+            sale_id,
+            store_id
+        ))
 
-            ORDER BY si.sale_item_id ASC
-            """,
-            (sale_id, current_store_id)
+        items = cursor.fetchall()
+
+        sale["total_sales"] = float(
+            sale["total_sales"]
         )
 
-        sale_items = cursor.fetchall()
+        sale["payment_amount"] = float(
+            sale["payment_amount"]
+        )
 
-        # Get the batches used for every sale item.
-        for item in sale_items:
+        sale["change_amount"] = float(
+            sale["change_amount"]
+        )
 
-            cursor.execute(
-                """
-                SELECT
-                    sib.sale_item_batch_id,
-                    sib.batch_id,
-                    sib.quantity AS batch_quantity,
-                    b.expiry_date,
-                    b.purchase_price
+        for item in items:
 
-                FROM sale_item_batches sib
-
-                JOIN batches b
-                    ON sib.batch_id = b.batch_id
-
-                WHERE sib.sale_item_id = %s
-                  AND b.store_id = %s
-
-                ORDER BY b.expiry_date ASC
-                """,
-                (
-                    item["sale_item_id"],
-                    current_store_id
-                )
+            item["unit_price"] = float(
+                item["unit_price"]
             )
 
-            item["batch_allocations"] = cursor.fetchall()
+            item["subtotal"] = float(
+                item["subtotal"]
+            )
 
-        sale["items"] = sale_items
+        sale["items"] = items
 
-        return jsonify(sale), 200
+        return jsonify({
+            "sale": sale
+        }), 200
 
     except Exception as e:
+
         return jsonify({
             "error": str(e)
         }), 500
 
     finally:
-        cursor.close()
-        db.close()
 
+        if cursor:
+            cursor.close()
 
-# Create a sale and allocate sold quantities to batches using FEFO.
-@sales_bp.route("/sales", methods=["POST"])
-@jwt_required()
-def add_sale():
+        if connection:
+            connection.close()
 
-    current_store_id = get_jwt_identity()
-    data = request.get_json() or {}
+@sales_bp.route(
+    "/<int:sale_id>/void",
+    methods=["PUT"]
+)
+@role_required("OWNER")
+def void_sale(sale_id):
 
-    items = data.get("items")
+    store_id = get_jwt().get("store_id")
 
-    if not items or not isinstance(items, list):
-        return jsonify({
-            "error": "Items are required and must be a list."
-        }), 400
-
-    db = get_db_connection()
-    cursor = db.cursor(dictionary=True)
+    connection = None
+    cursor = None
 
     try:
-        # Create the main sale record before processing products.
-        cursor.execute(
-            """
-            INSERT INTO sales
-            (
-                total_sales,
-                store_id
-            )
-            VALUES (%s, %s)
-            """,
-            (
-                0,
-                current_store_id
-            )
+
+        connection = get_db_connection()
+
+        cursor = connection.cursor(
+            dictionary=True
         )
 
-        sale_id = cursor.lastrowid
-        total_sales = 0
+        # Lock the sale
+        cursor.execute("""
+            SELECT
+                sale_id,
+                status
+            FROM sales
+            WHERE sale_id = %s
+            AND store_id = %s
+            FOR UPDATE
+        """, (
+            sale_id,
+            store_id
+        ))
 
-        today = datetime.now().date()
+        sale = cursor.fetchone()
 
+        if not sale:
+
+            return jsonify({
+                "error": "Sale not found."
+            }), 404
+
+        if sale["status"] == "VOIDED":
+
+            return jsonify({
+                "error": "Sale is already voided."
+            }), 400
+
+        # Get sale items
+        cursor.execute("""
+            SELECT
+                sale_item_id,
+                product_id,
+                quantity
+            FROM sale_items
+            WHERE sale_id = %s
+            AND store_id = %s
+        """, (
+            sale_id,
+            store_id
+        ))
+
+        items = cursor.fetchall()
+
+        if not items:
+
+            return jsonify({
+                "error": "Sale has no items."
+            }), 400
+
+        # ---------------------------------------------
+        # RESTORE INVENTORY
+        # ---------------------------------------------
         for item in items:
 
-            product_id = item.get("product_id")
-            quantity = item.get("quantity")
-
-            # Validate the required product and quantity.
-            if product_id is None or quantity is None:
-                raise Exception(
-                    "Each item must have product_id and quantity."
-                )
-
-            try:
-                product_id = int(product_id)
-                quantity = int(quantity)
-
-            except (ValueError, TypeError):
-                raise Exception(
-                    "Product ID and quantity must be valid numbers."
-                )
-
-            if quantity <= 0:
-                raise Exception(
-                    f"Quantity must be greater than zero for product ID {product_id}."
-                )
-
-            # Get the product and verify that it belongs to this store.
-            cursor.execute(
-                """
+            cursor.execute("""
                 SELECT
-                    p.product_id,
-                    p.product_name,
-                    p.price,
-                    COALESCE(i.stock_quantity, 0) AS stock_quantity
-
-                FROM products p
-
-                LEFT JOIN inventory i
-                    ON p.product_id = i.product_id
-
-                WHERE p.product_id = %s
-                  AND p.store_id = %s
-                """,
-                (
-                    product_id,
-                    current_store_id
-                )
-            )
-
-            product = cursor.fetchone()
-
-            if not product:
-                raise Exception(
-                    f"Product ID {product_id} not found or unauthorized."
-                )
-
-            current_stock = product["stock_quantity"]
-
-            # Check that total inventory has enough stock.
-            if quantity > current_stock:
-                raise Exception(
-                    f"Not enough stock for {product['product_name']}. "
-                    f"Available: {current_stock}"
-                )
-
-            # Get available batches using FEFO and exclude expired stock.
-            cursor.execute(
-                """
-                SELECT
-                    batch_id,
-                    quantity,
-                    purchase_price,
-                    expiry_date
-
-                FROM batches
-
+                    inventory_id,
+                    stock_quantity
+                FROM inventory
                 WHERE product_id = %s
-                  AND store_id = %s
-                  AND quantity > 0
-                  AND expiry_date >= %s
+                AND store_id = %s
+                FOR UPDATE
+            """, (
+                item["product_id"],
+                store_id
+            ))
 
-                ORDER BY
-                    expiry_date ASC,
-                    batch_id ASC
-                """,
-                (
-                    product_id,
-                    current_store_id,
-                    today
-                )
+            inventory = cursor.fetchone()
+
+            if not inventory:
+
+                connection.rollback()
+
+                return jsonify({
+                    "error":
+                        f"Inventory record not found for product {item['product_id']}."
+                }), 400
+
+            previous_quantity = inventory[
+                "stock_quantity"
+            ]
+
+            new_quantity = (
+                previous_quantity
+                + item["quantity"]
             )
 
-            batches = cursor.fetchall()
-
-            # Calculate available stock from valid non-expired batches.
-            available_batch_quantity = sum(
-                batch["quantity"]
-                for batch in batches
-            )
-
-            if quantity > available_batch_quantity:
-                raise Exception(
-                    f"Not enough non-expired batch stock for "
-                    f"{product['product_name']}. "
-                    f"Available: {available_batch_quantity}"
-                )
-
-            price = float(product["price"])
-            subtotal = price * quantity
-
-            # Save the product as a sale item.
-            cursor.execute(
-                """
-                INSERT INTO sale_items
-                (
-                    sale_id,
-                    product_id,
-                    quantity,
-                    price,
-                    subtotal
-                )
-                VALUES (%s, %s, %s, %s, %s)
-                """,
-                (
-                    sale_id,
-                    product_id,
-                    quantity,
-                    price,
-                    subtotal
-                )
-            )
-
-            sale_item_id = cursor.lastrowid
-            remaining_quantity = quantity
-
-            # Deduct from the earliest-expiring batches first.
-            for batch in batches:
-
-                if remaining_quantity <= 0:
-                    break
-
-                batch_id = batch["batch_id"]
-                batch_quantity = batch["quantity"]
-
-                quantity_to_deduct = min(
-                    remaining_quantity,
-                    batch_quantity
-                )
-
-                # Reduce the quantity remaining in this batch.
-                cursor.execute(
-                    """
-                    UPDATE batches
-                    SET quantity = quantity - %s
-                    WHERE batch_id = %s
-                      AND store_id = %s
-                      AND quantity >= %s
-                    """,
-                    (
-                        quantity_to_deduct,
-                        batch_id,
-                        current_store_id,
-                        quantity_to_deduct
-                    )
-                )
-
-                if cursor.rowcount == 0:
-                    raise Exception(
-                        f"Batch {batch_id} could not be updated."
-                    )
-
-                # Record exactly how much was taken from this batch.
-                cursor.execute(
-                    """
-                    INSERT INTO sale_item_batches
-                    (
-                        sale_item_id,
-                        batch_id,
-                        quantity
-                    )
-                    VALUES (%s, %s, %s)
-                    """,
-                    (
-                        sale_item_id,
-                        batch_id,
-                        quantity_to_deduct
-                    )
-                )
-
-                remaining_quantity -= quantity_to_deduct
-
-            # Reduce the overall inventory quantity.
-            cursor.execute(
-                """
+            cursor.execute("""
                 UPDATE inventory
-                SET stock_quantity = stock_quantity - %s
-                WHERE product_id = %s
-                  AND stock_quantity >= %s
-                """,
-                (
-                    quantity,
-                    product_id,
-                    quantity
-                )
-            )
+                SET stock_quantity = %s
+                WHERE inventory_id = %s
+                AND store_id = %s
+            """, (
+                new_quantity,
+                inventory["inventory_id"],
+                store_id
+            ))
 
-            if cursor.rowcount == 0:
-                raise Exception(
-                    f"Inventory update failed for "
-                    f"{product['product_name']}."
-                )
-
-            # Record the sale as a stock movement.
-            cursor.execute(
-                """
-                INSERT INTO stock_movements
-                (
+            # -----------------------------------------
+            # STOCK MOVEMENT
+            # -----------------------------------------
+            cursor.execute("""
+                INSERT INTO stock_movements (
                     product_id,
                     movement_type,
                     quantity,
-                    reference_id
+                    previous_quantity,
+                    new_quantity,
+                    reference_id,
+                    store_id
                 )
-                VALUES (%s, 'SALE', %s, %s)
-                """,
-                (
-                    product_id,
-                    quantity,
-                    sale_item_id
+                VALUES (
+                    %s,
+                    'STOCK_IN',
+                    %s,
+                    %s,
+                    %s,
+                    %s,
+                    %s
                 )
-            )
-
-            total_sales += subtotal
-
-        # Save the final total for the complete sale.
-        cursor.execute(
-            """
-            UPDATE sales
-            SET total_sales = %s
-            WHERE sale_id = %s
-              AND store_id = %s
-            """,
-            (
-                total_sales,
+            """, (
+                item["product_id"],
+                item["quantity"],
+                previous_quantity,
+                new_quantity,
                 sale_id,
-                current_store_id
-            )
-        )
+                store_id
+            ))
 
-        db.commit()
+        # ---------------------------------------------
+        # VOID SALE
+        # ---------------------------------------------
+        cursor.execute("""
+            UPDATE sales
+            SET status = 'VOIDED'
+            WHERE sale_id = %s
+            AND store_id = %s
+        """, (
+            sale_id,
+            store_id
+        ))
+
+        connection.commit()
 
         return jsonify({
-            "message": "Sale recorded successfully!",
-            "sale_id": sale_id,
-            "total_sales": round(total_sales, 2)
-        }), 201
+            "message": "Sale voided successfully and inventory restored."
+        }), 200
 
     except Exception as e:
 
-        db.rollback()
+        if connection:
+            connection.rollback()
 
         return jsonify({
             "error": str(e)
-        }), 400
+        }), 500
 
     finally:
-        cursor.close()
-        db.close()
+
+        if cursor:
+            cursor.close()
+
+        if connection:
+            connection.close()
