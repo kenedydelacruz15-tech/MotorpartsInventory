@@ -1,35 +1,42 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import api from "../services/api";
 
 export default function Inventory() {
   const [items, setItems] = useState([]);
   const [error, setError] = useState("");
-  const [search, setSearch] = useState("");
   const [loading, setLoading] = useState(false);
 
-  const [editingItem, setEditingItem] = useState(null);
-  const [stockQuantity, setStockQuantity] = useState("");
-  const [saving, setSaving] = useState(false);
+  // Search
+  const [search, setSearch] = useState("");
 
-  const [message, setMessage] = useState("");
+  // Stock movement modal
+  const [movementItem, setMovementItem] = useState(null);
+  const [movementType, setMovementType] = useState("");
+  const [movementQuantity, setMovementQuantity] = useState("");
+  const [movementReason, setMovementReason] = useState("");
+  const [movementRemarks, setMovementRemarks] = useState("");
 
+  // Adjust stock modal
+  const [editItem, setEditItem] = useState(null);
+  const [editQuantity, setEditQuantity] = useState("");
+
+  // Load inventory
   const loadInventory = async () => {
     try {
       setLoading(true);
       setError("");
 
-      const res = await api.get("/api/inventory/");
+      const res = await api.get("/api/inventory/", {
+        params: search ? { search } : {},
+      });
 
-      setItems(
-        Array.isArray(res.data)
-          ? res.data
-          : res.data.inventory || []
-      );
+      setItems(res.data || []);
     } catch (err) {
+      console.error("Inventory load error:", err);
       setError(
-        err.response?.data?.error ||
-          err.response?.data?.message ||
-          "Could not load inventory."
+        err.response?.data?.message ||
+          err.response?.data?.error ||
+          "Failed to load inventory."
       );
     } finally {
       setLoading(false);
@@ -40,442 +47,586 @@ export default function Inventory() {
     loadInventory();
   }, []);
 
-  const filteredItems = useMemo(() => {
-    const value = search.toLowerCase().trim();
-
-    if (!value) {
-      return items;
-    }
-
-    return items.filter(
-      (item) =>
-        (item.product_name || "")
-          .toLowerCase()
-          .includes(value) ||
-        (item.sku || "")
-          .toLowerCase()
-          .includes(value) ||
-        (item.brand || "")
-          .toLowerCase()
-          .includes(value) ||
-        (item.category_name || "")
-          .toLowerCase()
-          .includes(value)
-    );
-  }, [items, search]);
-
-  const groupedByCategory = useMemo(() => {
-    return filteredItems.reduce((groups, item) => {
-      const category =
-        item.category_name || "Uncategorized";
-
-      if (!groups[category]) {
-        groups[category] = [];
-      }
-
-      groups[category].push(item);
-
-      return groups;
-    }, {});
-  }, [filteredItems]);
-
-  const openEdit = (item) => {
-    setEditingItem(item);
-    setStockQuantity(item.stock_quantity ?? "");
-    setError("");
-    setMessage("");
-  };
-
-  const closeEdit = () => {
-    setEditingItem(null);
-    setStockQuantity("");
-  };
-
-  const updateStock = async (e) => {
+  // Search when user presses Enter
+  const handleSearch = (e) => {
     e.preventDefault();
+    loadInventory();
+  };
 
-    if (stockQuantity === "") {
-      setError("Stock quantity is required.");
+  // Open Stock In / Stock Out modal
+  const openMovement = (item, type) => {
+    console.log("BUTTON CLICKED:", type, item);
+
+    setMovementItem(item);
+    setMovementType(type);
+    setMovementQuantity("");
+    setMovementReason("");
+    setMovementRemarks("");
+  };
+
+  // Close movement modal
+  const closeMovement = () => {
+    setMovementItem(null);
+    setMovementType("");
+    setMovementQuantity("");
+    setMovementReason("");
+    setMovementRemarks("");
+  };
+
+  // Submit Stock In / Stock Out
+  const submitMovement = async () => {
+    if (!movementItem) return;
+
+    const quantity = Number(movementQuantity);
+
+    if (!quantity || quantity <= 0) {
+      alert("Please enter a valid quantity.");
       return;
     }
 
-    if (Number(stockQuantity) < 0) {
-      setError("Stock quantity cannot be negative.");
+    if (movementType === "STOCK_OUT" && !movementReason) {
+      alert("Please select a reason for Stock Out.");
       return;
     }
 
     try {
-      setSaving(true);
-      setError("");
-      setMessage("");
+      setLoading(true);
 
-      await api.put(
-        `/api/inventory/${editingItem.inventory_id}`,
-        {
-          stock_quantity: Number(stockQuantity),
-        }
+      const endpoint =
+        movementType === "STOCK_IN"
+          ? `/api/inventory/${movementItem.inventory_id}/stock-in`
+          : `/api/inventory/${movementItem.inventory_id}/stock-out`;
+
+      const payload = {
+        quantity,
+        remarks: movementRemarks,
+      };
+
+      if (movementType === "STOCK_IN") {
+        payload.reference_type = "SUPPLIER";
+      } else {
+        payload.reference_type = movementReason;
+      }
+
+      await api.post(endpoint, payload);
+
+      alert(
+        movementType === "STOCK_IN"
+          ? "Stock added successfully."
+          : "Stock removed successfully."
       );
 
-      closeEdit();
-      setMessage("Inventory stock updated successfully.");
+      closeMovement();
       await loadInventory();
     } catch (err) {
-      setError(
-        err.response?.data?.error ||
-          err.response?.data?.message ||
-          "Could not update inventory."
+      console.error("Stock movement error:", err);
+
+      alert(
+        err.response?.data?.message ||
+          err.response?.data?.error ||
+          "Stock movement failed."
       );
     } finally {
-      setSaving(false);
+      setLoading(false);
     }
   };
 
-  const deactivateInventory = async (item) => {
-    const stock = Number(item.stock_quantity) || 0;
+  // Open Adjust Stock modal
+  const openEdit = (item) => {
+    setEditItem(item);
+    setEditQuantity(item.stock_quantity);
+  };
 
-    if (stock > 0) {
-      setError(
-        "Inventory cannot be deactivated while stock is greater than 0."
+  // Close Adjust Stock modal
+  const closeEdit = () => {
+    setEditItem(null);
+    setEditQuantity("");
+  };
+
+  // Adjust stock
+  const submitEdit = async () => {
+    if (!editItem) return;
+
+    const quantity = Number(editQuantity);
+
+    if (Number.isNaN(quantity) || quantity < 0) {
+      alert("Please enter a valid stock quantity.");
+      return;
+    }
+
+    try {
+      setLoading(true);
+
+      await api.put(`/api/inventory/${editItem.inventory_id}`, {
+        stock_quantity: quantity,
+      });
+
+      alert("Stock adjusted successfully.");
+
+      closeEdit();
+      await loadInventory();
+    } catch (err) {
+      console.error("Stock adjustment error:", err);
+
+      alert(
+        err.response?.data?.message ||
+          err.response?.data?.error ||
+          "Stock adjustment failed."
       );
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // Deactivate inventory
+  const deactivateItem = async (item) => {
+    if (Number(item.stock_quantity) !== 0) {
+      alert("You can only deactivate an item when its stock is 0.");
       return;
     }
 
     const confirmed = window.confirm(
-      `Deactivate inventory for "${item.product_name}"?`
+      `Deactivate "${item.product_name}"?`
     );
 
-    if (!confirmed) {
-      return;
-    }
+    if (!confirmed) return;
 
     try {
-      setError("");
-      setMessage("");
+      setLoading(true);
 
       await api.put(
         `/api/inventory/${item.inventory_id}/deactivate`
       );
 
-      setMessage("Inventory deactivated successfully.");
+      alert("Inventory item deactivated.");
+
       await loadInventory();
     } catch (err) {
-      setError(
-        err.response?.data?.error ||
-          err.response?.data?.message ||
-          "Could not deactivate inventory."
+      console.error("Deactivate error:", err);
+
+      alert(
+        err.response?.data?.message ||
+          err.response?.data?.error ||
+          "Failed to deactivate item."
       );
+    } finally {
+      setLoading(false);
     }
   };
 
-  const restoreInventory = async (item) => {
+  // Restore inventory
+  const restoreItem = async (item) => {
     const confirmed = window.confirm(
-      `Restore inventory for "${item.product_name}"?`
+      `Restore "${item.product_name}"?`
     );
 
-    if (!confirmed) {
-      return;
-    }
+    if (!confirmed) return;
 
     try {
-      setError("");
-      setMessage("");
+      setLoading(true);
 
       await api.put(
         `/api/inventory/${item.inventory_id}/restore`
       );
 
-      setMessage("Inventory restored successfully.");
+      alert("Inventory item restored.");
+
       await loadInventory();
     } catch (err) {
-      setError(
-        err.response?.data?.error ||
-          err.response?.data?.message ||
-          "Could not restore inventory."
+      console.error("Restore error:", err);
+
+      alert(
+        err.response?.data?.message ||
+          err.response?.data?.error ||
+          "Failed to restore item."
       );
+    } finally {
+      setLoading(false);
     }
   };
 
-  const categories = Object.entries(groupedByCategory);
-
   return (
-    <div>
+    <div className="page-container">
       <div className="page-header">
         <div>
-          <h1>Current Inventory</h1>
-          <p>
-            View and manage current stock levels by category.
-          </p>
+          <h1>Inventory</h1>
+          <p>Manage stock levels and inventory movements.</p>
         </div>
       </div>
 
-      {error && <div className="alert">{error}</div>}
+      {/* Search */}
+      <form className="search-bar" onSubmit={handleSearch}>
+        <input
+          type="text"
+          placeholder="Search product, SKU, part number, brand..."
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+        />
 
-      {message && (
-        <div className="alert success-alert">
-          {message}
+        <button type="submit">
+          Search
+        </button>
+
+        <button
+          type="button"
+          onClick={() => {
+            setSearch("");
+            setTimeout(loadInventory, 0);
+          }}
+        >
+          Clear
+        </button>
+      </form>
+
+      {error && (
+        <div className="error-message">
+          {error}
         </div>
       )}
 
-      <div className="products-card">
-        <div className="table-header">
-          <div>
-            <h2>Inventory</h2>
-            <span>
-              {items.length} product
-              {items.length !== 1 ? "s" : ""}
-            </span>
-          </div>
-
-          <input
-            className="search"
-            type="text"
-            placeholder="Search product, SKU, brand, or category..."
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-          />
+      {loading && (
+        <div className="loading-message">
+          Loading...
         </div>
+      )}
 
-        {loading ? (
-          <div className="empty-state">
-            Loading inventory...
-          </div>
-        ) : categories.length === 0 ? (
-          <div className="empty-state">
-            <h3>No inventory found</h3>
-            <p>
-              There are no inventory products to display.
-            </p>
-          </div>
-        ) : (
-          <div className="inventory-categories">
-            {categories.map(
-              ([categoryName, products]) => (
-                <div
-                  className="inventory-category"
-                  key={categoryName}
-                >
-                  <div className="inventory-category-header">
-                    <div>
-                      <h3>{categoryName}</h3>
-                      <span>
-                        {products.length} product
-                        {products.length !== 1
-                          ? "s"
-                          : ""}
+      {/* Inventory table */}
+      <div className="table-container">
+        <table className="data-table">
+          <thead>
+            <tr>
+              <th>Product</th>
+              <th>SKU</th>
+              <th>Part Number</th>
+              <th>Brand</th>
+              <th>Category</th>
+              <th>Price</th>
+              <th>Reorder Level</th>
+              <th>Stock</th>
+              <th>Status</th>
+              <th>Actions</th>
+            </tr>
+          </thead>
+
+          <tbody>
+            {items.length === 0 ? (
+              <tr>
+                <td colSpan="10" className="empty-state">
+                  No inventory found.
+                </td>
+              </tr>
+            ) : (
+              items.map((item) => (
+                <tr key={item.inventory_id}>
+                  <td>
+                    <strong>{item.product_name}</strong>
+                  </td>
+
+                  <td>
+                    {item.sku || "-"}
+                  </td>
+
+                  <td>
+                    {item.part_number || "-"}
+                  </td>
+
+                  <td>
+                    {item.brand || "-"}
+                  </td>
+
+                  <td>
+                    {item.category_name || "-"}
+                  </td>
+
+                  <td>
+                    ₱{Number(item.selling_price || 0).toFixed(2)}
+                  </td>
+
+                  <td>
+                    {item.reorder_level ?? 0}
+                  </td>
+
+                  <td>
+                    <strong>
+                      {item.stock_quantity}
+                    </strong>
+                  </td>
+
+                  <td>
+                    {item.is_active ? (
+                      item.stock_quantity === 0 ? (
+                        <span className="status-badge danger">
+                          Out of Stock
+                        </span>
+                      ) : item.stock_quantity <=
+                        Number(item.reorder_level || 0) ? (
+                        <span className="status-badge warning">
+                          Low Stock
+                        </span>
+                      ) : (
+                        <span className="status-badge success">
+                          In Stock
+                        </span>
+                      )
+                    ) : (
+                      <span className="status-badge">
+                        Inactive
                       </span>
+                    )}
+                  </td>
+
+                  <td>
+                    <div className="action-buttons">
+                      {item.is_active ? (
+                        <>
+                          {/* Stock In */}
+                          <button
+                            type="button"
+                            className="btn-success"
+                            onClick={() =>
+                              openMovement(item, "STOCK_IN")
+                            }
+                          >
+                            Stock In
+                          </button>
+
+                          {/* Stock Out */}
+                          <button
+                            type="button"
+                            className="btn-warning"
+                            onClick={() =>
+                              openMovement(item, "STOCK_OUT")
+                            }
+                          >
+                            Stock Out
+                          </button>
+
+                          {/* Adjust */}
+                          <button
+                            type="button"
+                            className="btn-primary"
+                            onClick={() => openEdit(item)}
+                          >
+                            Adjust
+                          </button>
+
+                          {/* Deactivate */}
+                          <button
+                            type="button"
+                            className="btn-danger"
+                            onClick={() =>
+                              deactivateItem(item)
+                            }
+                          >
+                            Deactivate
+                          </button>
+                        </>
+                      ) : (
+                        /* Restore */
+                        <button
+                          type="button"
+                          className="btn-primary"
+                          onClick={() =>
+                            restoreItem(item)
+                          }
+                        >
+                          Restore
+                        </button>
+                      )}
                     </div>
-                  </div>
-
-                  <div className="table-container">
-                    <table>
-                      <thead>
-                        <tr>
-                          <th>Product</th>
-                          <th>SKU</th>
-                          <th>Brand</th>
-                          <th>Price</th>
-                          <th>Stock</th>
-                          <th>Reorder Level</th>
-                          <th>Status</th>
-                          <th>Actions</th>
-                        </tr>
-                      </thead>
-
-                      <tbody>
-                        {products.map((item) => {
-                          const stock =
-                            Number(item.stock_quantity) || 0;
-
-                          const reorderLevel =
-                            Number(item.reorder_level) || 0;
-
-                          const isLowStock =
-                            stock <= reorderLevel;
-
-                          return (
-                            <tr
-                              key={
-                                item.inventory_id ||
-                                item.product_id
-                              }
-                            >
-                              <td>
-                                <strong>
-                                  {item.product_name}
-                                </strong>
-                              </td>
-
-                              <td>
-                                {item.sku || "-"}
-                              </td>
-
-                              <td>
-                                {item.brand || "-"}
-                              </td>
-
-                              <td>
-                                ₱
-                                {Number(
-                                  item.selling_price || 0
-                                ).toFixed(2)}
-                              </td>
-
-                              <td
-                                className={
-                                  isLowStock
-                                    ? "low-stock"
-                                    : ""
-                                }
-                              >
-                                {stock}
-                              </td>
-
-                              <td>
-                                {reorderLevel}
-                              </td>
-
-                              <td>
-                                {item.is_active === 0 ||
-                                item.is_active === false ? (
-                                  <span className="status-badge inactive">
-                                    Inactive
-                                  </span>
-                                ) : stock === 0 ? (
-                                  <span className="status-badge inactive">
-                                    Out of Stock
-                                  </span>
-                                ) : isLowStock ? (
-                                  <span className="status-badge inactive">
-                                    Reorder
-                                  </span>
-                                ) : (
-                                  <span className="status-badge active">
-                                    Good Stock
-                                  </span>
-                                )}
-                              </td>
-
-                              <td>
-                                <div className="action-buttons">
-                                  <button
-                                    type="button"
-                                    className="btn btn-secondary"
-                                    onClick={() =>
-                                      openEdit(item)
-                                    }
-                                    disabled={
-                                      item.is_active === 0 ||
-                                      item.is_active === false
-                                    }
-                                  >
-                                    Edit
-                                  </button>
-
-                                  {item.is_active === 0 ||
-                                  item.is_active === false ? (
-                                    <button
-                                      type="button"
-                                      className="btn btn-primary"
-                                      onClick={() =>
-                                        restoreInventory(item)
-                                      }
-                                    >
-                                      Restore
-                                    </button>
-                                  ) : (
-                                    <button
-                                      type="button"
-                                      className="btn btn-danger"
-                                      onClick={() =>
-                                        deactivateInventory(
-                                          item
-                                        )
-                                      }
-                                    >
-                                      Deactivate
-                                    </button>
-                                  )}
-                                </div>
-                              </td>
-                            </tr>
-                          );
-                        })}
-                      </tbody>
-                    </table>
-                  </div>
-                </div>
-              )
+                  </td>
+                </tr>
+              ))
             )}
-          </div>
-        )}
+          </tbody>
+        </table>
       </div>
 
-      {editingItem && (
-        <div className="modal-overlay">
-          <div className="modal">
-            <div className="modal-header">
-              <div>
-                <h2>Update Inventory</h2>
-                <p>
-                  {editingItem.product_name}
-                </p>
-              </div>
+      {/* ============================= */}
+      {/* STOCK IN / STOCK OUT MODAL */}
+      {/* ============================= */}
+
+      {movementItem && (
+        <div
+          className="inventory-modal-overlay"
+          onClick={closeMovement}
+        >
+          <div
+            className="inventory-modal"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h2>
+              {movementType === "STOCK_IN"
+                ? "Stock In"
+                : "Stock Out"}
+            </h2>
+
+            <div className="modal-product">
+              <strong>
+                {movementItem.product_name}
+              </strong>
+
+              <span>
+                Current Stock:{" "}
+                {movementItem.stock_quantity}
+              </span>
+            </div>
+
+            <label>
+              Quantity
+            </label>
+
+            <input
+              type="number"
+              min="1"
+              placeholder="Enter quantity"
+              value={movementQuantity}
+              onChange={(e) =>
+                setMovementQuantity(e.target.value)
+              }
+              autoFocus
+            />
+
+            {movementType === "STOCK_OUT" && (
+              <>
+                <label>
+                  Reason
+                </label>
+
+                <select
+                  value={movementReason}
+                  onChange={(e) =>
+                    setMovementReason(e.target.value)
+                  }
+                >
+                  <option value="">
+                    Select reason
+                  </option>
+
+                  <option value="DAMAGED">
+                    Damaged
+                  </option>
+
+                  <option value="LOST">
+                    Lost
+                  </option>
+
+                  <option value="ADJUSTMENT">
+                    Adjustment
+                  </option>
+
+                  <option value="OTHER">
+                    Other
+                  </option>
+                </select>
+              </>
+            )}
+
+            <label>
+              Remarks
+            </label>
+
+            <textarea
+              placeholder="Optional remarks..."
+              value={movementRemarks}
+              onChange={(e) =>
+                setMovementRemarks(e.target.value)
+              }
+            />
+
+            <div className="modal-actions">
+              <button
+                type="button"
+                onClick={closeMovement}
+              >
+                Cancel
+              </button>
 
               <button
                 type="button"
-                className="modal-close"
-                onClick={closeEdit}
+                className={
+                  movementType === "STOCK_IN"
+                    ? "btn-success"
+                    : "btn-warning"
+                }
+                onClick={submitMovement}
+                disabled={loading}
               >
-                ×
+                {loading
+                  ? "Processing..."
+                  : "Confirm"}
               </button>
             </div>
+          </div>
+        </div>
+      )}
 
-            <form onSubmit={updateStock}>
-              <div className="form-group">
-                <label>Product</label>
-                <input
-                  type="text"
-                  value={
-                    editingItem.product_name || ""
-                  }
-                  disabled
-                />
-              </div>
+      {/* ============================= */}
+      {/* ADJUST STOCK MODAL */}
+      {/* ============================= */}
 
-              <div className="form-group">
-                <label>Current Stock</label>
-                <input
-                  type="number"
-                  min="0"
-                  value={stockQuantity}
-                  onChange={(e) =>
-                    setStockQuantity(e.target.value)
-                  }
-                  required
-                />
-              </div>
+      {editItem && (
+        <div
+          className="inventory-modal-overlay"
+          onClick={closeEdit}
+        >
+          <div
+            className="inventory-modal"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h2>
+              Adjust Stock
+            </h2>
 
-              <div className="form-actions">
-                <button
-                  type="button"
-                  className="btn btn-secondary"
-                  onClick={closeEdit}
-                  disabled={saving}
-                >
-                  Cancel
-                </button>
+            <div className="inventory-modal-product">
+              <strong>
+                {editItem.product_name}
+              </strong>
 
-                <button
-                  type="submit"
-                  className="btn btn-primary"
-                  disabled={saving}
-                >
-                  {saving
-                    ? "Saving..."
-                    : "Update Stock"}
-                </button>
-              </div>
-            </form>
+              <span>
+                Current Stock:{" "}
+                {editItem.stock_quantity}
+              </span>
+            </div>
+
+            <p className="modal-help">
+              Use Adjust only when the actual physical
+              stock does not match the system stock.
+            </p>
+
+            <label>
+              New Stock Quantity
+            </label>
+
+            <input
+              type="number"
+              min="0"
+              value={editQuantity}
+              onChange={(e) =>
+                setEditQuantity(e.target.value)
+              }
+              autoFocus
+            />
+
+            <div className="modal-actions">
+              <button
+                type="button"
+                onClick={closeEdit}
+              >
+                Cancel
+              </button>
+
+              <button
+                type="button"
+                className="btn-primary"
+                onClick={submitEdit}
+                disabled={loading}
+              >
+                {loading
+                  ? "Saving..."
+                  : "Save Adjustment"}
+              </button>
+            </div>
           </div>
         </div>
       )}

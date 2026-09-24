@@ -69,14 +69,14 @@ export default function Login() {
       }
 
       // Check role
-      const actualRole = user.role;
+      const actualRole = String(user.role || "").toUpperCase();
 
       if (!actualRole) {
         setError("Your account does not have a role assigned.");
         return;
       }
 
-      if (actualRole !== selectedRole) {
+      if (actualRole !== selectedRole.toUpperCase()) {
         setError(
           `This account is ${actualRole} and cannot use the ${selectedRole} login.`
         );
@@ -95,7 +95,10 @@ export default function Login() {
       // Save authentication information
       const saved = saveAuth({
         access_token: token,
-        user: user,
+        user: {
+          ...user,
+          role: actualRole,
+        },
       });
 
       console.log("AUTH SAVED:", saved);

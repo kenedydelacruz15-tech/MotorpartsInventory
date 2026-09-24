@@ -98,7 +98,7 @@ def get_dashboard_summary(store_id):
         sales_data = cursor.fetchone()
 
 
-        # Unread alerts
+        # Count store alerts
         cursor.execute(
             """
             SELECT COUNT(*) AS unread_alerts
@@ -106,11 +106,9 @@ def get_dashboard_summary(store_id):
             JOIN products p
                 ON a.product_id = p.product_id
             WHERE p.store_id = %s
-            AND a.status = 'UNREAD'
             """,
             (store_id,)
         )
-
         unread_alerts = cursor.fetchone()["unread_alerts"]
 
 

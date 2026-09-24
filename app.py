@@ -25,10 +25,14 @@ from routes.stock_movement_routes import stock_movement_bp
 from routes.dashboard_routes import dashboard_bp
 from routes.purchase_order_routes import purchase_order_bp
 from routes.user_routes import user_bp
+from routes.store_routes import store_bp
 
 app = Flask(__name__)
 
-CORS(app)
+CORS(app,
+    resources={r"/*": {"origins": "http://localhost:5173"}},
+    supports_credentials=True
+)
 
 app.config["JWT_SECRET_KEY"] = os.getenv("JWT_SECRET_KEY")
 
@@ -72,6 +76,8 @@ app.register_blueprint(stock_movement_bp)
 app.register_blueprint(dashboard_bp)
 
 app.register_blueprint(purchase_order_bp)
+
+app.register_blueprint(store_bp)
 
 
 @app.route("/")

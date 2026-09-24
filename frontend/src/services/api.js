@@ -1,4 +1,5 @@
 import axios from "axios";
+import { logout } from "./auth";
 
 const API_URL =
   import.meta.env.VITE_API_URL || "http://127.0.0.1:5000";
@@ -10,7 +11,7 @@ const api = axios.create({
   },
 });
 
-// Automatically attach JWT token to protected requests
+// Attach JWT automatically
 api.interceptors.request.use(
   (config) => {
     const token = localStorage.getItem("token");
@@ -21,23 +22,21 @@ api.interceptors.request.use(
 
     return config;
   },
-  (error) => {
-    return Promise.reject(error);
-  }
+  (error) => Promise.reject(error)
 );
 
-// Handle expired/invalid token
+// Handle authentication errors
 api.interceptors.response.use(
-  (response) => {
-    return response;
-  },
+  (response) => response,
+
   (error) => {
     if (error.response?.status === 401) {
-      localStorage.removeItem("token");
-      localStorage.removeItem("user");
+      const loginRequest =
+        error.config?.url?.includes("/login");
 
-      // Don't redirect the login request itself
-      if (!error.config?.url?.includes("/api/users/login")) {
+      logout();
+
+      if (!loginRequest && window.location.pathname !== "/login") {
         window.location.href = "/login";
       }
     }

@@ -15,6 +15,10 @@ import Categories from "./pages/Categories";
 import Products from "./pages/Products";
 import Inventory from "./pages/Inventory";
 import POS from "./pages/POS";
+import StoreSettings from "./pages/StoreSettings";
+import AdminUsers from "./pages/AdminUsers";
+import AdminStores from "./pages/AdminStores";
+import StaffManagement from "./pages/StaffManagement";
 
 import {
   getRole,
@@ -86,9 +90,15 @@ function Layout() {
 
 
           {userRole === "ADMIN" && (
-            <NavLink to="/admin/users">
-              Users
-            </NavLink>
+            <>
+              <NavLink to="/admin/stores">
+                Stores
+              </NavLink>
+
+              <NavLink to="/admin/users">
+                Users
+              </NavLink>
+            </>
           )}
 
 
@@ -113,6 +123,14 @@ function Layout() {
 
               <NavLink to="/products">
                 Products
+              </NavLink>
+
+              <NavLink to="/staff">
+                Staff
+              </NavLink>
+
+              <NavLink to="/settings/store">
+                Store Settings
               </NavLink>
             </>
           )}
@@ -199,20 +217,45 @@ function Layout() {
             }
           />
 
+          {/* Staff Management */}
+
+          <Route
+            path="/staff"
+            element={
+              <Protected roles={["OWNER"]}>
+                <StaffManagement />
+              </Protected>
+            }
+          />
+
+
+          {/* Store Settings */}
+
+          <Route
+            path="/settings/store"
+            element={
+              <Protected roles={["OWNER"]}>
+                <StoreSettings />
+              </Protected>
+            }
+          />
+
 
           {/* Admin Users */}
+         <Route
+            path="/admin/stores"
+            element={
+              <Protected roles={["ADMIN"]}>
+                <AdminStores />
+              </Protected>
+            }
+          />
 
           <Route
             path="/admin/users"
             element={
               <Protected roles={["ADMIN"]}>
-                <div>
-                  <h2>Users</h2>
-
-                  <p className="muted">
-                    System user management can be connected here.
-                  </p>
-                </div>
+                <AdminUsers />
               </Protected>
             }
           />
@@ -261,16 +304,7 @@ export default function App() {
 
         <Route
           path="/login"
-          element={
-            isLoggedIn() ? (
-              <Navigate
-                to="/dashboard"
-                replace
-              />
-            ) : (
-              <Login />
-            )
-          }
+          element={<Login />}
         />
 
 

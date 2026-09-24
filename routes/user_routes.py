@@ -847,3 +847,289 @@ def change_password():
         # Returns the connection to the pool.
         if connection:
             connection.close()
+
+
+    # Allows ADMIN to view all system users.
+@user_bp.route("/admin/users", methods=["GET"])
+@role_required("ADMIN")
+def admin_get_users():
+
+    connection = None
+    cursor = None
+
+    try:
+
+        connection = get_db_connection()
+        cursor = connection.cursor(dictionary=True)
+
+        cursor.execute("""
+            SELECT
+                u.user_id,
+                u.full_name,
+                u.username,
+                u.email,
+                u.role,
+                u.is_active,
+                u.store_id,
+                s.store_name,
+                u.created_at,
+                u.updated_at
+            FROM users u
+            LEFT JOIN stores s
+                ON u.store_id = s.store_id
+            ORDER BY u.created_at DESC
+        """)
+
+        users = cursor.fetchall()
+
+        return jsonify(users), 200
+
+    except Exception as e:
+
+        return jsonify({
+            "error": str(e)
+        }), 500
+
+    finally:
+
+        if cursor:
+            cursor.close()
+
+        if connection:
+            connection.close()
+
+
+# Allows ADMIN to create OWNER or STAFF accounts.
+@user_bp.route("/admin/users", methods=["POST"])
+@role_required("ADMIN")
+def admin_create_user():
+
+    data = request.get_json()
+
+    if not data:
+        return jsonify({
+            "error": "Request body is required."
+        }), 400
+
+    full_name = data.get("full_name", "").strip()
+    username = data.get("username", "").strip()
+    email = data.get("email", "").strip()
+    password = data.get("password", "")
+    role = data.get("role", "").strip().upper()
+    store_id = data.get("store_id")
+
+    # Validate required fields.
+    if not full_name or not username or not email or not password or not role:
+        return jsonify({
+            "error": "Full name, username, email, password, and role are required."
+        }), 400
+
+    # Only OWNER and STAFF can be created here.
+    if role not in ("OWNER", "STAFF"):
+        return jsonify({
+            "error": "Role must be OWNER or STAFF."
+        }), 400
+
+    # Validate password.
+    if len(password) < 8:
+        return jsonify({
+            "error": "Password must be at least 8 characters."
+        }), 400
+
+    # OWNER and STAFF must belong to a store.
+    if not store_id:
+        return jsonify({
+            "error": "Store ID is required."
+        }), 400
+
+    connection = None
+    cursor = None
+
+    try:
+
+        connection = get_db_connection()
+        cursor = connection.cursor(dictionary=True)
+
+        # Check username.
+        cursor.execute("""
+            SELECT user_id
+            FROM users
+            WHERE username = %s
+            LIMIT 1
+        """, (username,))
+
+        if cursor.fetchone():
+            return jsonify({
+                "error": "Username already exists."
+            }), 409
+
+        # Check email.
+        cursor.execute("""
+            SELECT user_id
+            FROM users
+            WHERE email = %s
+            LIMIT 1
+        """, (email,))
+
+        if cursor.fetchone():
+            return jsonify({
+                "error": "Email already exists."
+            }), 409
+
+        # Check store.
+        cursor.execute("""
+            SELECT store_id, store_name
+            FROM stores
+            WHERE store_id = %s
+            LIMIT 1
+        """, (store_id,))
+
+        store = cursor.fetchone()
+
+        if not store:
+            return jsonify({
+                "error": "Store not found."
+            }), 404
+
+        password_hash = generate_password_hash(password)
+
+        cursor.execute("""
+            INSERT INTO users (
+                full_name,
+                username,
+                email,
+                password_hash,
+                role,
+                is_active,
+                store_id
+            )
+            VALUES (%s, %s, %s, %s, %s, TRUE, %s)
+        """, (
+            full_name,
+            username,
+            email,
+            password_hash,
+            role,
+            store_id
+        ))
+
+        user_id = cursor.lastrowid
+
+        connection.commit()
+
+        return jsonify({
+            "message": "User created successfully.",
+            "user": {
+                "user_id": user_id,
+                "full_name": full_name,
+                "username": username,
+                "email": email,
+                "role": role,
+                "store_id": store_id,
+                "store_name": store["store_name"]
+            }
+        }), 201
+
+    except Exception as e:
+
+        if connection:
+            connection.rollback()
+
+        if "Duplicate entry" in str(e) or "1062" in str(e):
+            return jsonify({
+                "error": "Username or email already exists."
+            }), 409
+
+        return jsonify({
+            "error": str(e)
+        }), 500
+
+    finally:
+
+        if cursor:
+            cursor.close()
+
+        if connection:
+            connection.close()
+
+
+# Allows ADMIN to activate or deactivate any user.
+@user_bp.route("/admin/users/<int:user_id>/status", methods=["PUT"])
+@role_required("ADMIN")
+def admin_update_user_status(user_id):
+
+    data = request.get_json()
+
+    if not data or "is_active" not in data:
+        return jsonify({
+            "error": "is_active is required."
+        }), 400
+
+    is_active = bool(data["is_active"])
+
+    connection = None
+    cursor = None
+
+    try:
+
+        connection = get_db_connection()
+        cursor = connection.cursor(dictionary=True)
+
+        # Check whether the user exists.
+        cursor.execute("""
+            SELECT user_id, username, role
+            FROM users
+            WHERE user_id = %s
+        """, (user_id,))
+
+        user = cursor.fetchone()
+
+        if not user:
+            return jsonify({
+                "error": "User not found."
+            }), 404
+
+        # Prevent ADMIN from disabling another ADMIN.
+        if user["role"] == "ADMIN":
+            return jsonify({
+                "error": "ADMIN accounts cannot be changed here."
+            }), 403
+
+        cursor.execute("""
+            UPDATE users
+            SET is_active = %s
+            WHERE user_id = %s
+        """, (
+            is_active,
+            user_id
+        ))
+
+        connection.commit()
+
+        return jsonify({
+            "message": (
+                "User activated successfully."
+                if is_active
+                else "User deactivated successfully."
+            )
+        }), 200
+
+    except Exception as e:
+
+        if connection:
+            connection.rollback()
+
+        return jsonify({
+            "error": str(e)
+        }), 500
+
+    finally:
+
+        # Closes the database cursor.
+        if cursor:
+            cursor.close()
+
+        # Returns the connection to the pool.
+        if connection:
+            connection.close()
+
